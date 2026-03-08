@@ -6,6 +6,9 @@
 - 路由与 DNS 偏好配置
 - Cloudflare WARP 账户生成与落地
 - 生成运行时配置并重启 `sing-box`
+- 启动时先渲染 TUI，再后台执行 `sing-box` 检查与已选节点自动应用
+- Dashboard / footer / logs 实时显示启动阶段与应用进度
+- 全局 apply 互斥，避免启动自动应用、手动应用、节点切换应用并发冲突
 - 内存日志 + 文件日志（`~/.config/tsingbox/logs/app.log`）
 
 ## 环境要求

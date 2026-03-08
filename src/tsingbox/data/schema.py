@@ -23,7 +23,11 @@ CREATE TABLE IF NOT EXISTS warp_accounts (
     private_key TEXT NOT NULL,
     local_address_v4 TEXT NOT NULL,
     local_address_v6 TEXT NOT NULL,
-    reserved TEXT NOT NULL
+    reserved TEXT NOT NULL,
+    peer_public_key TEXT,
+    peer_endpoint_host TEXT,
+    peer_endpoint_port INTEGER,
+    peer_allowed_ips TEXT
 );
 
 CREATE TABLE IF NOT EXISTS preferences (

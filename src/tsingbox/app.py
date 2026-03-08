@@ -23,6 +23,7 @@ from tsingbox.services.config_builder import ConfigBuilder
 from tsingbox.services.singbox_binary_service import SingboxBinaryCheckResult, SingboxBinaryService
 from tsingbox.services.singbox_controller import SingboxController
 from tsingbox.services.subscription_manager import SubscriptionManager
+from tsingbox.services.warp_bootstrap_resolver import WarpBootstrapResolver
 from tsingbox.services.warp_generator import WarpGenerator
 from tsingbox.ui.screens.config import ConfigScreen
 from tsingbox.ui.screens.dashboard import DashboardScreen
@@ -41,6 +42,7 @@ class DashboardState:
     node_name: str
     node_protocol: str
     node_port: str
+    inbound_port: str
     node_count: int
     singbox_status: str
     routing_mode: str
@@ -127,18 +129,27 @@ class TSingBoxApp(App[None]):
         )
         self.controller = SingboxController(log_callback=self.append_log)
         self.singbox_binary_service = SingboxBinaryService()
-        self.warp_generator = WarpGenerator(self.warp_repo)
+        self.warp_generator = WarpGenerator(self.warp_repo, log_callback=self.append_log)
+        self.warp_bootstrap_resolver = WarpBootstrapResolver(self.warp_repo, log_callback=self.append_log)
 
         self.logs: list[str] = []
         self._screen_map: dict[str, Screen] = {}
         self.current_screen_name = "dashboard"
         self.last_action_message = "准备就绪"
+        self.startup_in_progress = False
+        self.startup_status_message: str | None = None
+        self.apply_in_progress = False
+        self.apply_owner: str | None = None
+        self.apply_status_message: str | None = None
+        self._startup_worker_scheduled = False
+        self._apply_lock = asyncio.Lock()
         self.dashboard_state = DashboardState(
             subscription_name="未选择",
             subscription_updated_at="未更新",
             node_name="未选择",
             node_protocol="未提供",
             node_port="未提供",
+            inbound_port="未提供",
             node_count=0,
             singbox_status="stopped",
             routing_mode="rule",
@@ -175,9 +186,8 @@ class TSingBoxApp(App[None]):
             "logs": self.query_one("#logs", LogsScreen),
         }
         self.show_screen("dashboard")
-        await self._check_singbox_binary_on_startup()
-        await self._auto_apply_selected_node_on_startup()
         await self.refresh_dashboard_state()
+        self._schedule_startup_tasks()
 
     async def on_unmount(self) -> None:
         await self.controller.stop()
@@ -197,7 +207,7 @@ class TSingBoxApp(App[None]):
         self.show_screen("dashboard")
 
     async def action_apply(self) -> None:
-        await self.apply_runtime_config()
+        await self.request_apply(reason="action")
 
     async def action_refresh(self) -> None:
         await self.refresh_current_screen()
@@ -229,9 +239,10 @@ class TSingBoxApp(App[None]):
 
     async def refresh_dashboard_state(self) -> DashboardState:
         self.dashboard_state = await self.get_dashboard_state()
+        status_message = self._current_status_message()
         if self._can_query_ui():
             dashboard = self.query_one("#dashboard", DashboardScreen)
-            dashboard.update_state(self.dashboard_state, self.last_action_message)
+            dashboard.update_state(self.dashboard_state, status_message)
         self._update_footer()
         return self.dashboard_state
 
@@ -250,6 +261,7 @@ class TSingBoxApp(App[None]):
             node_name=selected_node.tag if selected_node else "未选择",
             node_protocol=selected_node.protocol if selected_node else "未提供",
             node_port=self._extract_node_port(selected_node),
+            inbound_port=self._extract_inbound_port(),
             node_count=len(all_nodes),
             singbox_status=self._get_singbox_status(),
             routing_mode=preferences.routing_mode,
@@ -291,6 +303,33 @@ class TSingBoxApp(App[None]):
                 return value.strip()
         return "未提供"
 
+    def _extract_inbound_port(self) -> str:
+        try:
+            raw_content = self.settings.runtime_config_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return "未提供"
+        except OSError:
+            return "未提供"
+
+        try:
+            config = json.loads(raw_content)
+        except json.JSONDecodeError:
+            return "未提供"
+
+        inbounds = config.get("inbounds")
+        if not isinstance(inbounds, list):
+            return "未提供"
+
+        for inbound in inbounds:
+            if not isinstance(inbound, dict):
+                continue
+            value = inbound.get("listen_port")
+            if isinstance(value, int):
+                return str(value)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return "未提供"
+
     def _get_singbox_status(self) -> str:
         status_method = getattr(self.controller, "status", None)
         if callable(status_method):
@@ -322,25 +361,66 @@ class TSingBoxApp(App[None]):
         footer.update_status(
             current_screen=self.SCREEN_LABELS.get(self.current_screen_name, self.current_screen_name),
             singbox_status=self.dashboard_state.singbox_status,
-            last_message=self.last_action_message,
+            last_message=self._current_status_message(),
         )
 
-    async def _check_singbox_binary_on_startup(self) -> None:
-        preferences = await self.preferences_repo.get_preferences()
-        result = self.singbox_binary_service.resolve_binary(preferences)
-        if result.ok:
+    def _schedule_startup_tasks(self) -> None:
+        if self._startup_worker_scheduled:
             return
-        msg = self.singbox_binary_service.get_missing_binary_message(result)
-        self.last_action_message = msg
-        self.append_log(msg)
-        await self.refresh_dashboard_state()
+        self._startup_worker_scheduled = True
+        self.run_worker(
+            self._run_startup_sequence(),
+            group="startup",
+            exclusive=True,
+        )
 
-    async def _auto_apply_selected_node_on_startup(self) -> None:
+    async def _run_startup_sequence(self) -> None:
+        self.startup_in_progress = True
+        self.startup_status_message = "启动中：正在检查 sing-box 可执行文件"
+        self.last_action_message = self.startup_status_message
+        self.append_log("开始后台启动检查")
+        await self.refresh_dashboard_state()
+        try:
+            should_auto_apply = await self._check_singbox_binary_on_startup()
+            if should_auto_apply:
+                self.startup_status_message = "启动中：正在后台应用已选节点"
+                self.last_action_message = self.startup_status_message
+                self.append_log("检测到已选节点，开始后台自动应用")
+                await self.refresh_dashboard_state()
+                await self._auto_apply_selected_node_on_startup()
+            else:
+                self.append_log("启动阶段未触发自动应用")
+        except Exception as exc:  # noqa: BLE001
+            message = f"启动流程失败: {exc}"
+            self.last_action_message = message
+            self.append_log(message)
+            await self.refresh_dashboard_state()
+        finally:
+            self.startup_in_progress = False
+            self.startup_status_message = None
+            self.append_log("启动流程完成")
+            await self.refresh_dashboard_state()
+
+    async def _check_singbox_binary_on_startup(self) -> bool:
+        binary_ready, _, binary_result = await self.ensure_singbox_binary_ready()
+        if not binary_ready:
+            msg = self.singbox_binary_service.get_missing_binary_message(binary_result)
+            self.last_action_message = msg
+            self.append_log(f"sing-box 检查失败: {msg}")
+            await self.refresh_dashboard_state()
+            return False
+        self.append_log("sing-box 检查通过")
+        preferences = await self.preferences_repo.get_preferences()
+        selected_node = await self._get_selected_node(preferences.selected_node_id)
+        return selected_node is not None
+
+    async def _auto_apply_selected_node_on_startup(self) -> tuple[bool, str] | None:
         preferences = await self.preferences_repo.get_preferences()
         selected_node = await self._get_selected_node(preferences.selected_node_id)
         if selected_node is None:
-            return
-        await self.apply_runtime_config()
+            self.append_log("启动阶段未找到已选节点，跳过自动应用")
+            return None
+        return await self.request_apply_runtime_config(source="startup")
 
     def validate_singbox_binary_input(self, raw_value: str | None) -> tuple[str | None, str | None]:
         normalized = self.singbox_binary_service.normalize_input(raw_value)
@@ -380,6 +460,63 @@ class TSingBoxApp(App[None]):
             except (NoMatches, ScreenStackError):
                 pass
 
+    def _current_status_message(self) -> str:
+        if self.startup_in_progress and self.startup_status_message:
+            return self.startup_status_message
+        if self.apply_in_progress and self.apply_status_message:
+            return self.apply_status_message
+        return self.last_action_message
+
+    async def _set_apply_state(
+        self,
+        applying: bool,
+        *,
+        owner: str | None = None,
+        message: str | None = None,
+    ) -> None:
+        self.apply_in_progress = applying
+        self.apply_owner = owner if applying else None
+        self.apply_status_message = message if applying else None
+        await self.refresh_dashboard_state()
+
+    async def request_apply_runtime_config(self, *, source: str = "user") -> tuple[bool, str]:
+        source_labels = {
+            "startup": "启动自动应用",
+            "user": "用户手动应用",
+            "node_select": "节点切换应用",
+            "action": "快捷键应用",
+            "manual": "手动应用",
+        }
+        owner_label = source_labels.get(source, source)
+        if self._apply_lock.locked():
+            active_owner = source_labels.get(self.apply_owner or "", self.apply_owner or "未知来源")
+            msg = f"已有应用任务进行中（来源: {active_owner}）"
+            if source == "startup":
+                self.append_log(f"启动自动应用跳过：{msg}")
+                return False, msg
+            self.last_action_message = msg
+            self.append_log(msg)
+            await self.refresh_dashboard_state()
+            return False, msg
+
+        apply_message = {
+            "startup": "启动中：正在后台应用已选节点",
+            "node_select": "正在应用节点...",
+            "user": "正在应用配置...",
+            "action": "正在应用配置...",
+            "manual": "正在应用配置...",
+        }.get(source, "正在应用配置...")
+
+        async with self._apply_lock:
+            await self._set_apply_state(True, owner=source, message=apply_message)
+            try:
+                return await self.apply_runtime_config()
+            finally:
+                await self._set_apply_state(False)
+
+    async def request_apply(self, *, reason: str = "manual") -> tuple[bool, str]:
+        return await self.request_apply_runtime_config(source=reason)
+
     async def _finalize_runtime_apply(self, ok: bool, msg: str) -> tuple[bool, str]:
         self.last_action_message = msg
         self.append_log(msg)
@@ -388,7 +525,8 @@ class TSingBoxApp(App[None]):
 
     async def apply_runtime_config(self) -> tuple[bool, str]:
         try:
-            config = await self.config_builder.build_config()
+            bootstrap_stages = await self.config_builder.build_bootstrap_stages()
+            await self.config_builder.build_config(predefined_hosts={})
         except ValueError as exc:
             return await self._finalize_runtime_apply(False, f"应用失败（业务校验）: {exc}")
         except Exception as exc:  # noqa: BLE001
@@ -401,6 +539,61 @@ class TSingBoxApp(App[None]):
                 f"应用失败（sing-box 检测）: {self.singbox_binary_service.get_missing_binary_message(binary_result)}",
             )
 
+        self.controller.binary = binary_path or self.controller.binary
+
+        try:
+            predefined_hosts = await self._resolve_runtime_stage_hosts(bootstrap_stages)
+        except RuntimeError as exc:
+            return await self._finalize_runtime_apply(False, str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return await self._finalize_runtime_apply(False, f"应用失败（阶段预解析）: {exc}")
+
+        try:
+            final_config = await self.config_builder.build_config(predefined_hosts=predefined_hosts)
+        except ValueError as exc:
+            return await self._finalize_runtime_apply(False, f"应用失败（业务校验）: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            return await self._finalize_runtime_apply(False, f"应用失败（配置生成）: {exc}")
+
+        self.append_log("切换到正式链式配置")
+        return await self._write_and_restart_final_config(final_config)
+
+    async def _resolve_runtime_stage_hosts(self, stages) -> dict[str, list[str]]:
+        predefined_hosts: dict[str, list[str]] = {}
+        if not stages:
+            return predefined_hosts
+
+        for index, stage in enumerate(stages, start=1):
+            self.append_log(f"启动第 {index} 层临时代理用于预解析")
+            try:
+                await self._write_bootstrap_config(stage.config)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"应用失败（bootstrap 配置写入）: {exc}") from exc
+            bootstrap_result = await self.controller.restart(self.settings.runtime_bootstrap_config_path)
+            if not bootstrap_result.ok:
+                raise RuntimeError(f"应用失败（bootstrap sing-box 重启）: {bootstrap_result.error or 'unknown error'}")
+
+            bootstrap_port = stage.config.inbounds[0]["listen_port"]
+            proxy_url = f"http://127.0.0.1:{bootstrap_port}"
+            try:
+                resolved_hosts = await self.warp_bootstrap_resolver.resolve_hosts(
+                    proxy_url=proxy_url,
+                    hosts=stage.resolve_hosts,
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"应用失败（阶段预解析）: {exc}") from exc
+            predefined_hosts.update(resolved_hosts)
+            self.append_log(f"第 {index} 层解析结果: {resolved_hosts}")
+            if index < len(stages):
+                self.append_log(f"切换到第 {index + 1} 阶段配置")
+        return predefined_hosts
+
+    async def _write_bootstrap_config(self, bootstrap_config) -> None:
+        bootstrap_json = bootstrap_config.model_dump_json(indent=2, exclude_none=True)
+        self.settings.runtime_bootstrap_config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settings.runtime_bootstrap_config_path.write_text(bootstrap_json, encoding="utf-8")
+
+    async def _write_and_restart_final_config(self, config) -> tuple[bool, str]:
         config_json = config.model_dump_json(indent=2, exclude_none=True)
         try:
             self.settings.runtime_config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -408,7 +601,6 @@ class TSingBoxApp(App[None]):
         except Exception as exc:  # noqa: BLE001
             return await self._finalize_runtime_apply(False, f"应用失败（配置写入）: {exc}")
 
-        self.controller.binary = binary_path or self.controller.binary
         result = await self.controller.restart(self.settings.runtime_config_path)
         if result.ok:
             return await self._finalize_runtime_apply(True, "配置已应用并重启 sing-box")

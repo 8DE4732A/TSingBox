@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import re
 
@@ -8,25 +9,75 @@ import pytest
 from tsingbox.app import TSingBoxApp
 from tsingbox.core.settings import Settings
 from tsingbox.ui.screens.config import ConfigScreen
+from tsingbox.ui.screens.dashboard import DashboardScreen
 from tsingbox.services.singbox_binary_service import SingboxBinaryCheckResult, SingboxBinaryStatus
 from tsingbox.services.singbox_controller import ControlResult
 from conftest import create_initialized_app
-from textual.widgets import Log, Static, Switch
+from textual.widgets import Button, Log, Static, Switch
 
 
 class DummyConfig:
+    def __init__(self, payload: str = '{"outbounds": []}', *, endpoints=None, inbounds=None) -> None:
+        self.payload = payload
+        self.endpoints = endpoints or []
+        self.inbounds = inbounds or [{"listen_port": 7890}]
+
     def model_dump_json(self, **kwargs) -> str:
-        return '{"outbounds": []}'
+        return self.payload
+
+
+class DummyStage:
+    def __init__(self, config: DummyConfig, resolve_hosts: list[str]) -> None:
+        self.config = config
+        self.resolve_hosts = resolve_hosts
 
 
 class FailingBuilder:
-    async def build_config(self):
+    async def build_config(self, **kwargs):
         raise ValueError("尚未选择节点")
+
+    async def build_bootstrap_stages(self):
+        return []
 
 
 class SuccessBuilder:
-    async def build_config(self):
+    async def build_config(self, **kwargs):
         return DummyConfig()
+
+    async def build_bootstrap_stages(self):
+        return []
+
+
+class StageBuilder:
+    def __init__(self) -> None:
+        self.build_config_calls: list[dict] = []
+        self.stage_calls = 0
+
+    async def build_config(self, **kwargs):
+        self.build_config_calls.append(kwargs)
+        predefined_hosts = kwargs.get("predefined_hosts") or {}
+        payload = '{"outbounds": []}'
+        if predefined_hosts:
+            payload = (
+                '{"dns":{"servers":[{"type":"hosts","tag":"hosts-dns","predefined":'
+                '{"engage.cloudflareclient.com":["198.51.100.10"]}}]}}'
+            )
+        return DummyConfig(payload)
+
+    async def build_bootstrap_stages(self):
+        self.stage_calls += 1
+        return [
+            DummyStage(
+                DummyConfig('{"outbounds": [], "inbounds":[{"listen_port":17890}]}', inbounds=[{"listen_port": 17890}]),
+                ["engage.cloudflareclient.com"],
+            )
+        ]
+
+
+class IpWarpBuilder(StageBuilder):
+    async def build_bootstrap_stages(self):
+        self.stage_calls += 1
+        return []
 
 
 class RestartFailController:
@@ -44,6 +95,18 @@ class RestartSuccessController:
 
     async def restart(self, config_path: Path) -> ControlResult:
         self.restart_calls.append(config_path)
+        return ControlResult(ok=True)
+
+
+class SequenceController(RestartSuccessController):
+    def __init__(self, results: list[ControlResult] | None = None) -> None:
+        super().__init__()
+        self.results = results or []
+
+    async def restart(self, config_path: Path) -> ControlResult:
+        self.restart_calls.append(config_path)
+        if self.results:
+            return self.results.pop(0)
         return ControlResult(ok=True)
 
 
@@ -93,6 +156,7 @@ async def test_get_dashboard_state_without_selected_node(tmp_path):
     assert state.subscription_updated_at == "未更新"
     assert state.node_name == "未选择"
     assert state.node_port == "未提供"
+    assert state.inbound_port == "未提供"
     assert state.node_count == 0
     assert state.singbox_status == "stopped"
     assert state.routing_mode == "rule"
@@ -119,6 +183,8 @@ async def test_get_dashboard_state_with_selected_node_and_subscription(tmp_path)
     nodes = await app.nodes_repo.list_nodes()
     await app.preferences_repo.set_selected_node(nodes[0].id)
 
+    app.settings.runtime_config_path.write_text('{"inbounds":[{"listen_port":7890}]}', encoding="utf-8")
+
     state = await app.get_dashboard_state()
 
     assert nodes[0].sub_id == sub_id
@@ -127,6 +193,7 @@ async def test_get_dashboard_state_with_selected_node_and_subscription(tmp_path)
     assert state.node_name == "节点 A"
     assert state.node_protocol == "vless"
     assert state.node_port == "443"
+    assert state.inbound_port == "7890"
     assert state.node_count == 1
 
 
@@ -157,6 +224,7 @@ async def test_get_dashboard_state_uses_running_status_and_missing_port_fallback
 
     assert state.singbox_status == "running"
     assert state.node_port == "未提供"
+    assert state.inbound_port == "未提供"
     assert state.routing_mode == "global"
     assert state.dns_leak_protection == "开启"
     assert state.warp_enabled == "开启"
@@ -196,6 +264,20 @@ async def test_apply_runtime_config_restart_error(tmp_path):
     assert "sing-box 重启" in msg
     assert "不存在" in msg
     assert app.last_action_message == msg
+
+
+class SuccessResolver:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def resolve_hosts(self, *, proxy_url: str, hosts: list[str]):
+        self.calls.append({"proxy_url": proxy_url, "hosts": hosts})
+        return {"engage.cloudflareclient.com": ["198.51.100.10"]}
+
+
+class FailingResolver:
+    async def resolve_hosts(self, *, proxy_url: str, hosts: list[str]):
+        raise RuntimeError("resolver boom")
 
 
 async def fake_ready_check():
@@ -255,6 +337,87 @@ async def test_apply_runtime_config_uses_resolved_binary(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_apply_runtime_config_runs_stage_flow_for_warp_domain(tmp_path):
+    app = TSingBoxApp()
+    app.settings = Settings(base_dir=tmp_path)
+    app.database.settings = app.settings
+    app.settings.ensure_dirs()
+    builder = StageBuilder()
+    controller = SequenceController()
+    resolver = SuccessResolver()
+    app.config_builder = builder
+    app.controller = controller
+    app.warp_bootstrap_resolver = resolver
+    app.ensure_singbox_binary_ready = fake_ready_check  # type: ignore[method-assign]
+    await app.database.initialize()
+
+    ok, msg = await app.apply_runtime_config()
+
+    assert ok
+    assert msg == "配置已应用并重启 sing-box"
+    assert builder.stage_calls == 1
+    assert builder.build_config_calls == [
+        {"predefined_hosts": {}},
+        {"predefined_hosts": {"engage.cloudflareclient.com": ["198.51.100.10"]}},
+    ]
+    assert resolver.calls == [{"proxy_url": "http://127.0.0.1:17890", "hosts": ["engage.cloudflareclient.com"]}]
+    assert controller.restart_calls == [
+        app.settings.runtime_bootstrap_config_path,
+        app.settings.runtime_config_path,
+    ]
+    assert "hosts-dns" in app.settings.runtime_config_path.read_text(encoding="utf-8")
+    assert any("启动第 1 层临时代理用于预解析" in line for line in app.logs)
+    assert any("第 1 层解析结果" in line for line in app.logs)
+    assert any("切换到正式链式配置" in line for line in app.logs)
+
+
+@pytest.mark.asyncio
+async def test_apply_runtime_config_keeps_old_runtime_when_stage_resolution_fails(tmp_path):
+    app = TSingBoxApp()
+    app.settings = Settings(base_dir=tmp_path)
+    app.database.settings = app.settings
+    app.settings.ensure_dirs()
+    app.settings.runtime_config_path.write_text('{"existing": true}', encoding="utf-8")
+    app.config_builder = StageBuilder()
+    app.controller = SequenceController()
+    app.warp_bootstrap_resolver = FailingResolver()
+    app.ensure_singbox_binary_ready = fake_ready_check  # type: ignore[method-assign]
+    await app.database.initialize()
+
+    ok, msg = await app.apply_runtime_config()
+
+    assert not ok
+    assert "阶段预解析" in msg
+    assert app.settings.runtime_config_path.read_text(encoding="utf-8") == '{"existing": true}'
+    assert app.controller.restart_calls == [app.settings.runtime_bootstrap_config_path]
+
+
+@pytest.mark.asyncio
+async def test_apply_runtime_config_skips_stage_flow_when_no_bootstrap_stage(tmp_path):
+    app = TSingBoxApp()
+    app.settings = Settings(base_dir=tmp_path)
+    app.database.settings = app.settings
+    app.settings.ensure_dirs()
+    builder = IpWarpBuilder()
+    controller = SequenceController()
+    resolver = SuccessResolver()
+    app.config_builder = builder
+    app.controller = controller
+    app.warp_bootstrap_resolver = resolver
+    app.ensure_singbox_binary_ready = fake_ready_check  # type: ignore[method-assign]
+    await app.database.initialize()
+
+    ok, msg = await app.apply_runtime_config()
+
+    assert ok
+    assert msg == "配置已应用并重启 sing-box"
+    assert builder.stage_calls == 1
+    assert builder.build_config_calls == [{"predefined_hosts": {}}, {"predefined_hosts": {}}]
+    assert resolver.calls == []
+    assert controller.restart_calls == [app.settings.runtime_config_path]
+
+
+@pytest.mark.asyncio
 async def test_startup_check_sets_message_when_system_binary_missing(tmp_path):
     app = await create_initialized_app(tmp_path)
 
@@ -264,8 +427,9 @@ async def test_startup_check_sets_message_when_system_binary_missing(tmp_path):
         configured_path=None,
     )
 
-    await app._check_singbox_binary_on_startup()
+    should_auto_apply = await app._check_singbox_binary_on_startup()
 
+    assert should_auto_apply is False
     assert "未检测到系统 sing-box" in app.last_action_message
 
 
@@ -338,6 +502,19 @@ async def test_config_screen_refresh_reads_latest_runtime_config(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dashboard_screen_shows_inbound_port_from_runtime_config(tmp_path):
+    app = await create_initialized_app(tmp_path)
+    app.settings.runtime_config_path.write_text('{"inbounds":[{"listen_port":7890}]}', encoding="utf-8")
+
+    async with app.run_test() as pilot:
+        await pilot.press("1")
+        await pilot.pause()
+
+        inbound = app.query_one("#dashboard-inbound-port", Static)
+        assert str(inbound.render()) == "本地代理端口: 7890"
+
+
+@pytest.mark.asyncio
 async def test_logs_screen_appends_new_log_line_without_full_refresh(tmp_path):
     app = await create_initialized_app(tmp_path)
 
@@ -365,9 +542,134 @@ async def test_startup_check_sets_message_when_configured_binary_invalid(tmp_pat
         configured_path="/missing/sing-box",
     )
 
-    await app._check_singbox_binary_on_startup()
+    should_auto_apply = await app._check_singbox_binary_on_startup()
 
+    assert should_auto_apply is False
     assert "路径不存在" in app.last_action_message
+
+
+@pytest.mark.asyncio
+async def test_startup_tasks_run_in_background_without_blocking_initial_render(tmp_path):
+    app = await create_initialized_app(tmp_path)
+    startup_started = asyncio.Event()
+    startup_released = asyncio.Event()
+    startup_finished = asyncio.Event()
+
+    async def fake_check_startup():
+        app.startup_status_message = "启动中：正在检查 sing-box 可执行文件"
+        app.last_action_message = app.startup_status_message
+        app.append_log("startup check")
+        await app.refresh_dashboard_state()
+        return True
+
+    async def fake_auto_apply_startup():
+        startup_started.set()
+        app.startup_status_message = "启动中：正在后台应用已选节点"
+        app.last_action_message = app.startup_status_message
+        app.apply_in_progress = True
+        app.apply_owner = "startup"
+        app.apply_status_message = app.startup_status_message
+        app.append_log("startup auto apply begin")
+        await app.refresh_dashboard_state()
+        await startup_released.wait()
+        app.apply_in_progress = False
+        app.apply_owner = None
+        app.apply_status_message = None
+        app.last_action_message = "启动自动应用完成"
+        app.append_log("startup auto apply done")
+        await app.refresh_dashboard_state()
+        startup_finished.set()
+        return True, "启动自动应用完成"
+
+    app._check_singbox_binary_on_startup = fake_check_startup  # type: ignore[method-assign]
+    app._auto_apply_selected_node_on_startup = fake_auto_apply_startup  # type: ignore[method-assign]
+
+    pilot_cm = app.run_test()
+    pilot = await asyncio.wait_for(pilot_cm.__aenter__(), timeout=1)
+    try:
+        await pilot.pause()
+        await asyncio.wait_for(startup_started.wait(), timeout=1)
+        await pilot.pause()
+
+        dashboard = app.query_one("#dashboard", DashboardScreen)
+        apply_status = app.query_one("#apply-status", Static)
+        footer = app.query_one("#footer-status", Static)
+
+        assert dashboard.display is True
+        assert not startup_finished.is_set()
+        assert app.startup_in_progress is True
+        assert str(apply_status.render()) == "启动中：正在后台应用已选节点"
+        assert "状态: 启动中：正在后台应用已选节点" in str(footer.render())
+
+        await pilot.press("7")
+        await pilot.pause()
+
+        logs = app.query_one("#logs-content", Log)
+        assert any("startup check" in line for line in logs.lines)
+        assert any("startup auto apply begin" in line for line in logs.lines)
+
+        startup_released.set()
+        await asyncio.wait_for(startup_finished.wait(), timeout=1)
+        await pilot.press("1")
+        await pilot.pause()
+
+        assert app.startup_in_progress is False
+        assert str(app.query_one("#apply-status", Static).render()) == "启动自动应用完成"
+    finally:
+        await pilot_cm.__aexit__(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_startup_auto_apply_excludes_manual_apply_action(tmp_path):
+    app = await create_initialized_app(tmp_path)
+    startup_apply_started = asyncio.Event()
+    startup_apply_released = asyncio.Event()
+    apply_calls: list[str] = []
+
+    async def fake_check_startup():
+        return True
+
+    async def fake_apply_runtime_config():
+        apply_calls.append("apply")
+        if len(apply_calls) == 1:
+            startup_apply_started.set()
+            await startup_apply_released.wait()
+        return True, "配置已应用并重启 sing-box"
+
+    async def fake_auto_apply_startup():
+        return await app.request_apply(reason="startup")
+
+    app._check_singbox_binary_on_startup = fake_check_startup  # type: ignore[method-assign]
+    app._auto_apply_selected_node_on_startup = fake_auto_apply_startup  # type: ignore[method-assign]
+    app.apply_runtime_config = fake_apply_runtime_config  # type: ignore[method-assign]
+
+    pilot_cm = app.run_test()
+    pilot = await asyncio.wait_for(pilot_cm.__aenter__(), timeout=1)
+    try:
+        await pilot.pause()
+        await asyncio.wait_for(startup_apply_started.wait(), timeout=1)
+        await pilot.pause()
+
+        apply_button = app.query_one("#apply-config", Button)
+        apply_status = app.query_one("#apply-status", Static)
+        assert apply_button.disabled is True
+        assert str(apply_status.render()) == "启动中：正在后台应用已选节点"
+
+        await pilot.press("a")
+        await pilot.pause()
+
+        assert apply_calls == ["apply"]
+        assert app.last_action_message == "已有应用任务进行中（来源: 启动自动应用）"
+        assert str(app.query_one("#apply-status", Static).render()) == "启动中：正在后台应用已选节点"
+
+        startup_apply_released.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert apply_calls == ["apply"]
+        assert app.apply_in_progress is False
+    finally:
+        await pilot_cm.__aexit__(None, None, None)
 
 
 @pytest.mark.asyncio
@@ -387,33 +689,35 @@ async def test_auto_apply_selected_node_on_startup_runs_when_selected_node_exist
     node = (await app.nodes_repo.list_nodes())[0]
     await app.preferences_repo.set_selected_node(node.id)
 
-    calls: list[bool] = []
+    calls: list[str] = []
 
-    async def fake_apply_runtime_config():
-        calls.append(True)
+    async def fake_request_apply_runtime_config(*, source: str = "user"):
+        calls.append(source)
         return True, "配置已应用并重启 sing-box"
 
-    app.apply_runtime_config = fake_apply_runtime_config  # type: ignore[method-assign]
+    app.request_apply_runtime_config = fake_request_apply_runtime_config  # type: ignore[method-assign]
 
-    await app._auto_apply_selected_node_on_startup()
+    result = await app._auto_apply_selected_node_on_startup()
 
-    assert calls == [True]
+    assert result == (True, "配置已应用并重启 sing-box")
+    assert calls == ["startup"]
 
 
 @pytest.mark.asyncio
 async def test_auto_apply_selected_node_on_startup_skips_when_no_selected_node(tmp_path):
     app = await create_initialized_app(tmp_path)
 
-    calls: list[bool] = []
+    calls: list[str] = []
 
-    async def fake_apply_runtime_config():
-        calls.append(True)
+    async def fake_request_apply_runtime_config(*, source: str = "user"):
+        calls.append(source)
         return True, "配置已应用并重启 sing-box"
 
-    app.apply_runtime_config = fake_apply_runtime_config  # type: ignore[method-assign]
+    app.request_apply_runtime_config = fake_request_apply_runtime_config  # type: ignore[method-assign]
 
-    await app._auto_apply_selected_node_on_startup()
+    result = await app._auto_apply_selected_node_on_startup()
 
+    assert result is None
     assert calls == []
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 
 from textual import work
@@ -20,6 +21,7 @@ class NodesScreen(Vertical):
         self._subscriptions_by_id: dict[int, Subscription] = {}
         self._current_node_ids: list[int] = []
         self._applying = False
+        self._status_message: str | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -62,9 +64,11 @@ class NodesScreen(Vertical):
         await self.select_and_apply_current_node()
 
     async def reload_nodes(self) -> None:
-        subscriptions = await self.app.subscriptions_repo.list_subscriptions()  # type: ignore[attr-defined]
-        nodes = await self.app.nodes_repo.list_nodes()  # type: ignore[attr-defined]
-        preferences = await self.app.preferences_repo.get_preferences()  # type: ignore[attr-defined]
+        subscriptions, nodes, preferences = await asyncio.gather(
+            self.app.subscriptions_repo.list_subscriptions(),  # type: ignore[attr-defined]
+            self.app.nodes_repo.list_nodes(),  # type: ignore[attr-defined]
+            self.app.preferences_repo.get_preferences(),  # type: ignore[attr-defined]
+        )
 
         self._selected_node_id = preferences.selected_node_id
         self._subscriptions_by_id = {subscription.id: subscription for subscription in subscriptions}
@@ -82,6 +86,8 @@ class NodesScreen(Vertical):
         await self._update_subscription_tabs(subscriptions)
         self._active_sub_id = self._choose_active_subscription(subscriptions, selected_node)
         self._sync_tabs_active()
+        if not self._is_apply_in_progress():
+            self._status_message = None
         self._render_current_subscription_status(
             selected_missing=selected_missing,
             selected_node=selected_node,
@@ -89,16 +95,17 @@ class NodesScreen(Vertical):
         )
 
     async def select_and_apply_current_node(self) -> None:
-        if self._applying:
+        if self._is_apply_in_progress():
             return
 
         node_id = self._get_highlighted_node_id()
         if node_id is None:
-            self.query_one("#nodes-status", Static).update("请先选择节点")
+            self._status_message = "请先选择节点"
+            self._render_current_subscription_status(status_override=self._status_message)
             return
 
         self._selected_node_id = node_id
-        self._render_current_subscription_status(status_override="正在应用节点...")
+        self._set_apply_state(True, "正在应用节点...")
         self.apply_node_worker(node_id)
 
     @work(exclusive=True)
@@ -107,11 +114,11 @@ class NodesScreen(Vertical):
         try:
             await self.app.preferences_repo.set_selected_node(node_id)  # type: ignore[attr-defined]
             self._selected_node_id = node_id
-            _, msg = await self.app.apply_runtime_config()  # type: ignore[attr-defined]
+            _, msg = await self.app.request_apply(reason="node_select")  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
             msg = f"应用失败（节点切换）: {exc}"
         self._applying = False
-        self._render_current_subscription_status(status_override=msg)
+        self._set_apply_state(False, msg)
         self._focus_nodes_list()
 
     async def _update_subscription_tabs(self, subscriptions: list[Subscription]) -> None:
@@ -151,6 +158,7 @@ class NodesScreen(Vertical):
 
         if self._active_sub_id is None:
             self.query_one("#nodes-status", Static).update("暂无订阅，请先添加订阅")
+            self._update_controls_for_apply_state()
             return
 
         current_nodes = self._nodes_by_subscription.get(self._active_sub_id, [])
@@ -162,6 +170,8 @@ class NodesScreen(Vertical):
 
         if status_override is not None:
             status = status_override
+        elif self._is_apply_in_progress():
+            status = self._status_message or "正在应用节点..."
         elif not self._subscriptions_by_id:
             status = "暂无订阅，请先添加订阅"
         elif (total_nodes or 0) == 0:
@@ -177,6 +187,7 @@ class NodesScreen(Vertical):
                 status = f"当前订阅: {subscription.name if subscription else self._active_sub_id} · 已选节点: {selected_node.tag}"
 
         self.query_one("#nodes-status", Static).update(status)
+        self._update_controls_for_apply_state()
 
     def _restore_highlight_for_current_subscription(self, current_nodes: list[Node]) -> None:
         option_list = self.query_one("#nodes-list", OptionList)
@@ -191,6 +202,19 @@ class NodesScreen(Vertical):
                     highlighted_index = index
                     break
         option_list.highlighted = highlighted_index
+
+    def _is_apply_in_progress(self) -> bool:
+        return self._applying or bool(getattr(self.app, "apply_in_progress", False))  # type: ignore[attr-defined]
+
+    def _set_apply_state(self, applying: bool, status_message: str) -> None:
+        self._applying = applying
+        self._status_message = status_message
+        self._render_current_subscription_status(status_override=status_message)
+
+    def _update_controls_for_apply_state(self) -> None:
+        applying = self._is_apply_in_progress()
+        self.query_one("#refresh-nodes", Button).disabled = applying
+        self.query_one("#nodes-list", OptionList).disabled = applying
 
     def _get_highlighted_node_id(self) -> int | None:
         option_list = self.query_one("#nodes-list", OptionList)

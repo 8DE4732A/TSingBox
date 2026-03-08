@@ -29,10 +29,23 @@ class Database:
     async def initialize(self) -> None:
         async with self.connect() as conn:
             await conn.executescript(SCHEMA_SQL)
+
             cursor = await conn.execute("PRAGMA table_info(preferences)")
-            columns = {row["name"] for row in await cursor.fetchall()}
-            if "singbox_binary_path" not in columns:
+            preference_columns = {row["name"] for row in await cursor.fetchall()}
+            if "singbox_binary_path" not in preference_columns:
                 await conn.execute("ALTER TABLE preferences ADD COLUMN singbox_binary_path TEXT")
+
+            cursor = await conn.execute("PRAGMA table_info(warp_accounts)")
+            warp_columns = {row["name"] for row in await cursor.fetchall()}
+            if "peer_public_key" not in warp_columns:
+                await conn.execute("ALTER TABLE warp_accounts ADD COLUMN peer_public_key TEXT")
+            if "peer_endpoint_host" not in warp_columns:
+                await conn.execute("ALTER TABLE warp_accounts ADD COLUMN peer_endpoint_host TEXT")
+            if "peer_endpoint_port" not in warp_columns:
+                await conn.execute("ALTER TABLE warp_accounts ADD COLUMN peer_endpoint_port INTEGER")
+            if "peer_allowed_ips" not in warp_columns:
+                await conn.execute("ALTER TABLE warp_accounts ADD COLUMN peer_allowed_ips TEXT")
+
             await conn.execute(
                 """
                 INSERT OR IGNORE INTO preferences (

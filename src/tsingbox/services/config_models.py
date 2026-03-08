@@ -34,7 +34,8 @@ class RouteRule(BaseModel):
 
 class RouteConfig(BaseModel):
     final: str
-    rules: list[RouteRule] = Field(default_factory=list)
+    rules: list[dict[str, Any] | RouteRule] = Field(default_factory=list)
+    default_domain_resolver: dict[str, Any] | None = None
 
 
 class DNSServer(BaseModel):
@@ -42,15 +43,22 @@ class DNSServer(BaseModel):
     tag: str | None = None
     server: str | None = None
     server_port: int | None = None
+    detour: str | None = None
+    domain_resolver: str | None = None
+    path: str | None = None
+    predefined: dict[str, list[str]] | None = None
 
 
 class DNSConfig(BaseModel):
     servers: list[DNSServer] = Field(default_factory=list)
+    rules: list[dict[str, Any]] = Field(default_factory=list)
+    final: str | None = None
 
 
 class SingBoxConfig(BaseModel):
     log: dict[str, Any] = Field(default_factory=lambda: {"level": "info"})
     dns: DNSConfig = Field(default_factory=DNSConfig)
+    inbounds: list[dict[str, Any]] = Field(default_factory=list)
     outbounds: list[dict[str, Any]]
     endpoints: list[WireGuardEndpoint] = Field(default_factory=list)
     route: RouteConfig

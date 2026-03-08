@@ -21,6 +21,10 @@ class Settings:
         return self.runtime_dir / "config.json"
 
     @property
+    def runtime_bootstrap_config_path(self) -> Path:
+        return self.runtime_dir / "bootstrap-config.json"
+
+    @property
     def logs_dir(self) -> Path:
         return self.base_dir / "logs"
 

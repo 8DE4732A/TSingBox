@@ -29,6 +29,10 @@ class WarpAccount:
     local_address_v4: str
     local_address_v6: str
     reserved: str
+    peer_public_key: str | None
+    peer_endpoint_host: str | None
+    peer_endpoint_port: int | None
+    peer_allowed_ips: str | None
 
 
 @dataclass(slots=True)
