@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tsingbox"
+version = "0.1.0"
+description = "Textual TUI client for sing-box"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "textual>=0.63.0",
+  "pydantic>=2.7.0",
+  "httpx>=0.27.0",
+  "cryptography>=42.0.0",
+  "aiosqlite>=0.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2.0",
+  "pytest-asyncio>=0.23.7",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tsingbox"]
