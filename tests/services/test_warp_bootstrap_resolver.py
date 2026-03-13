@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 import httpx
 import pytest
@@ -141,7 +142,8 @@ async def test_resolver_resolves_multiple_hosts_via_proxy_doh(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_resolver_raises_clear_error_when_doh_answer_empty(monkeypatch, tmp_path):
+@mock.patch("asyncio.sleep")
+async def test_resolver_raises_clear_error_when_doh_answer_empty(mock_sleep, monkeypatch, tmp_path):
     repo = await _create_repo(tmp_path)
 
     import tsingbox.services.warp_bootstrap_resolver as mod
@@ -151,10 +153,12 @@ async def test_resolver_raises_clear_error_when_doh_answer_empty(monkeypatch, tm
     resolver = WarpBootstrapResolver(repo)
     with pytest.raises(WarpBootstrapResolveError, match="解析目标域名失败"):
         await resolver.resolve_predefined_hosts(proxy_url="http://127.0.0.1:17890")
+    assert mock_sleep.call_count == 4
 
 
 @pytest.mark.asyncio
-async def test_resolver_raises_clear_error_on_invalid_doh_json(monkeypatch, tmp_path):
+@mock.patch("asyncio.sleep")
+async def test_resolver_raises_clear_error_on_invalid_doh_json(mock_sleep, monkeypatch, tmp_path):
     repo = await _create_repo(tmp_path)
 
     import tsingbox.services.warp_bootstrap_resolver as mod
@@ -164,10 +168,12 @@ async def test_resolver_raises_clear_error_on_invalid_doh_json(monkeypatch, tmp_
     resolver = WarpBootstrapResolver(repo)
     with pytest.raises(WarpBootstrapResolveError, match="DoH 响应不是合法 JSON"):
         await resolver.resolve_hosts(proxy_url="http://127.0.0.1:17890", hosts=["engage.cloudflareclient.com"])
+    assert mock_sleep.call_count == 4
 
 
 @pytest.mark.asyncio
-async def test_resolver_raises_clear_error_on_doh_failure_status(monkeypatch, tmp_path):
+@mock.patch("asyncio.sleep")
+async def test_resolver_raises_clear_error_on_doh_failure_status(mock_sleep, monkeypatch, tmp_path):
     repo = await _create_repo(tmp_path)
 
     import tsingbox.services.warp_bootstrap_resolver as mod
@@ -177,10 +183,12 @@ async def test_resolver_raises_clear_error_on_doh_failure_status(monkeypatch, tm
     resolver = WarpBootstrapResolver(repo)
     with pytest.raises(WarpBootstrapResolveError, match="DoH 查询失败"):
         await resolver.resolve_hosts(proxy_url="http://127.0.0.1:17890", hosts=["engage.cloudflareclient.com"])
+    assert mock_sleep.call_count == 4
 
 
 @pytest.mark.asyncio
-async def test_resolver_raises_clear_error_on_timeout(monkeypatch, tmp_path):
+@mock.patch("asyncio.sleep")
+async def test_resolver_raises_clear_error_on_timeout(mock_sleep, monkeypatch, tmp_path):
     repo = await _create_repo(tmp_path)
 
     import tsingbox.services.warp_bootstrap_resolver as mod
@@ -190,10 +198,12 @@ async def test_resolver_raises_clear_error_on_timeout(monkeypatch, tmp_path):
     resolver = WarpBootstrapResolver(repo)
     with pytest.raises(WarpBootstrapResolveError, match="超时"):
         await resolver.resolve_hosts(proxy_url="http://127.0.0.1:17890", hosts=["engage.cloudflareclient.com"])
+    assert mock_sleep.call_count == 4
 
 
 @pytest.mark.asyncio
-async def test_resolver_raises_clear_error_on_proxy_error(monkeypatch, tmp_path):
+@mock.patch("asyncio.sleep")
+async def test_resolver_raises_clear_error_on_proxy_error(mock_sleep, monkeypatch, tmp_path):
     repo = await _create_repo(tmp_path)
 
     import tsingbox.services.warp_bootstrap_resolver as mod
@@ -203,3 +213,4 @@ async def test_resolver_raises_clear_error_on_proxy_error(monkeypatch, tmp_path)
     resolver = WarpBootstrapResolver(repo)
     with pytest.raises(WarpBootstrapResolveError, match="失败"):
         await resolver.resolve_hosts(proxy_url="http://127.0.0.1:17890", hosts=["engage.cloudflareclient.com"])
+    assert mock_sleep.call_count == 4
