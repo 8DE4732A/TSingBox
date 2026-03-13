@@ -591,13 +591,25 @@ class TSingBoxApp(App[None]):
                 raise RuntimeError(f"应用失败（预解析代理端口 {bootstrap_port} 未就绪）")
 
             proxy_url = f"http://127.0.0.1:{bootstrap_port}"
-            try:
-                resolved_hosts = await self.warp_bootstrap_resolver.resolve_hosts(
-                    proxy_url=proxy_url,
-                    hosts=stage.resolve_hosts,
-                )
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(f"应用失败（阶段预解析）: {exc}") from exc
+
+            resolved_hosts = None
+            last_exc = None
+            for attempt in range(5):
+                try:
+                    resolved_hosts = await self.warp_bootstrap_resolver.resolve_hosts(
+                        proxy_url=proxy_url,
+                        hosts=stage.resolve_hosts,
+                    )
+                    break  # Success
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    self.append_log(f"第 {index} 层预解析失败 (第 {attempt + 1}/5 次): {exc}")
+                    if attempt < 4:
+                        await asyncio.sleep(1.0)
+
+            if resolved_hosts is None:
+                raise RuntimeError(f"应用失败（阶段预解析）: 重试5次后失败: {last_exc}") from last_exc
+
             predefined_hosts.update(resolved_hosts)
             self.append_log(f"第 {index} 层解析结果: {resolved_hosts}")
             if index < len(stages):
