@@ -4,6 +4,8 @@ import asyncio
 from pathlib import Path
 import re
 
+from unittest import mock
+
 import pytest
 
 from tsingbox.app import TSingBoxApp
@@ -337,7 +339,12 @@ async def test_apply_runtime_config_uses_resolved_binary(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_apply_runtime_config_runs_stage_flow_for_warp_domain(tmp_path):
+@mock.patch("asyncio.open_connection")
+async def test_apply_runtime_config_runs_stage_flow_for_warp_domain(mock_open_conn, tmp_path):
+    # Mock open_connection to simulate a ready proxy port
+    mock_writer = mock.AsyncMock()
+    mock_open_conn.return_value = (mock.AsyncMock(), mock_writer)
+
     app = TSingBoxApp()
     app.settings = Settings(base_dir=tmp_path)
     app.database.settings = app.settings
@@ -372,7 +379,12 @@ async def test_apply_runtime_config_runs_stage_flow_for_warp_domain(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_apply_runtime_config_keeps_old_runtime_when_stage_resolution_fails(tmp_path):
+@mock.patch("asyncio.open_connection")
+async def test_apply_runtime_config_keeps_old_runtime_when_stage_resolution_fails(mock_open_conn, tmp_path):
+    # Mock open_connection to simulate a ready proxy port
+    mock_writer = mock.AsyncMock()
+    mock_open_conn.return_value = (mock.AsyncMock(), mock_writer)
+
     app = TSingBoxApp()
     app.settings = Settings(base_dir=tmp_path)
     app.database.settings = app.settings

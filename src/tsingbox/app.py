@@ -574,6 +574,22 @@ class TSingBoxApp(App[None]):
                 raise RuntimeError(f"应用失败（bootstrap sing-box 重启）: {bootstrap_result.error or 'unknown error'}")
 
             bootstrap_port = stage.config.inbounds[0]["listen_port"]
+
+            # Wait for proxy port to be ready
+            port_ready = False
+            for _ in range(50):
+                try:
+                    _, writer = await asyncio.open_connection("127.0.0.1", bootstrap_port)
+                    writer.close()
+                    await writer.wait_closed()
+                    port_ready = True
+                    break
+                except OSError:
+                    await asyncio.sleep(0.1)
+
+            if not port_ready:
+                raise RuntimeError(f"应用失败（预解析代理端口 {bootstrap_port} 未就绪）")
+
             proxy_url = f"http://127.0.0.1:{bootstrap_port}"
             try:
                 resolved_hosts = await self.warp_bootstrap_resolver.resolve_hosts(
