@@ -339,8 +339,9 @@ async def test_apply_runtime_config_uses_resolved_binary(tmp_path):
 
 
 @pytest.mark.asyncio
+@mock.patch("asyncio.sleep")
 @mock.patch("asyncio.open_connection")
-async def test_apply_runtime_config_runs_stage_flow_for_warp_domain(mock_open_conn, tmp_path):
+async def test_apply_runtime_config_runs_stage_flow_for_warp_domain(mock_open_conn, mock_sleep, tmp_path):
     # Mock open_connection to simulate a ready proxy port
     mock_writer = mock.AsyncMock()
     mock_open_conn.return_value = (mock.AsyncMock(), mock_writer)
@@ -379,8 +380,9 @@ async def test_apply_runtime_config_runs_stage_flow_for_warp_domain(mock_open_co
 
 
 @pytest.mark.asyncio
+@mock.patch("asyncio.sleep")
 @mock.patch("asyncio.open_connection")
-async def test_apply_runtime_config_keeps_old_runtime_when_stage_resolution_fails(mock_open_conn, tmp_path):
+async def test_apply_runtime_config_keeps_old_runtime_when_stage_resolution_fails(mock_open_conn, mock_sleep, tmp_path):
     # Mock open_connection to simulate a ready proxy port
     mock_writer = mock.AsyncMock()
     mock_open_conn.return_value = (mock.AsyncMock(), mock_writer)

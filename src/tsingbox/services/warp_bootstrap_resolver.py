@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from collections.abc import Callable
@@ -37,8 +38,21 @@ class WarpBootstrapResolver:
                 continue
             if self._is_ip_address(normalized_host):
                 continue
-            addresses = await self._resolve_host_via_doh(normalized_host, proxy_url=proxy_url)
+
+            addresses = None
+            last_exc = None
+            for attempt in range(5):
+                try:
+                    addresses = await self._resolve_host_via_doh(normalized_host, proxy_url=proxy_url)
+                    break
+                except WarpBootstrapResolveError as exc:
+                    last_exc = exc
+                    if attempt < 4:
+                        await asyncio.sleep(1.0)
+
             if not addresses:
+                if last_exc:
+                    raise last_exc
                 raise WarpBootstrapResolveError(f"通过临时代理解析目标域名失败: {normalized_host}")
             result[normalized_host] = addresses
         self.log_callback(f"阶段域名解析结果: {result}")
