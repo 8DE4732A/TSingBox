@@ -86,6 +86,22 @@ def test_parse_line_trojan():
     assert parsed["protocol"] == "trojan"
 
 
+def test_parse_line_anytls():
+    manager = SubscriptionManager(subscriptions_repo=None, nodes_repo=None)  # type: ignore[arg-type]
+    line = "anytls://mypassword@example.com:443?sni=example.com&alpn=h2,http/1.1&fp=chrome#anytls-node"
+    parsed = manager.parse_line(line)
+    assert parsed is not None
+    assert parsed["protocol"] == "anytls"
+    assert parsed["config"]["server"] == "example.com"
+    assert parsed["config"]["server_port"] == 443
+    assert parsed["config"]["password"] == "mypassword"
+    assert parsed["config"]["tls"]["enabled"] is True
+    assert parsed["config"]["tls"]["server_name"] == "example.com"
+    assert parsed["config"]["tls"]["alpn"] == ["h2", "http/1.1"]
+    assert parsed["config"]["tls"]["utls"]["fingerprint"] == "chrome"
+    assert parsed["tag"] == "anytls-node"
+
+
 def test_parse_line_vmess():
     manager = SubscriptionManager(subscriptions_repo=None, nodes_repo=None)  # type: ignore[arg-type]
     vmess_json = '{"v":"2","ps":"vmess-node","add":"example.com","port":"443","id":"11111111-1111-1111-1111-111111111111","aid":"0","scy":"auto","net":"ws","type":"none","host":"cdn.example.com","path":"/ws","tls":"tls","sni":"sni.example.com"}'

@@ -14,6 +14,7 @@ SUBSCRIPTION_HEADERS = {
 
 from tsingbox.data.repositories.nodes import NodesRepository
 from tsingbox.data.repositories.subscriptions import SubscriptionsRepository
+from tsingbox.services.parsers.anytls import AnytlsParser
 from tsingbox.services.parsers.base import ParseError
 from tsingbox.services.parsers.trojan import TrojanParser
 from tsingbox.services.parsers.vless import VlessParser
@@ -55,6 +56,7 @@ class SubscriptionManager:
             "vless://": VlessParser(),
             "trojan://": TrojanParser(),
             "vmess://": VmessParser(),
+            "anytls://": AnytlsParser(),
         }
 
     async def refresh_subscription(self, *, name: str, url: str) -> int:
@@ -103,10 +105,10 @@ class SubscriptionManager:
         if not text:
             return []
 
-        if "\n" not in text and not text.startswith(("vless://", "trojan://", "vmess://")):
+        if "\n" not in text and not text.startswith(("vless://", "trojan://", "vmess://", "anytls://")):
             try:
                 decoded = base64.b64decode(text + "===", validate=False).decode("utf-8", errors="ignore")
-                if any(prefix in decoded for prefix in ("vless://", "trojan://", "vmess://")):
+                if any(prefix in decoded for prefix in ("vless://", "trojan://", "vmess://", "anytls://")):
                     text = decoded
             except Exception:
                 pass
