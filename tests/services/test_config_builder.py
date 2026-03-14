@@ -184,7 +184,7 @@ async def test_build_bootstrap_stages_with_warp_keeps_current_layer_on_bootstrap
     stages = await builder.build_bootstrap_stages()
 
     assert len(stages) == 1
-    assert stages[0].resolve_hosts == ["engage.cloudflareclient.com"]
+    assert stages[0].resolve_hosts == ["example.com", "engage.cloudflareclient.com"]
     cfg = stages[0].config
     assert cfg.route.final == "proxy-node"
     assert cfg.dns.final == "bootstrap-dns"
@@ -194,7 +194,7 @@ async def test_build_bootstrap_stages_with_warp_keeps_current_layer_on_bootstrap
     assert [item["tag"] for item in cfg.outbounds] == ["direct", "proxy-node"]
     assert _dns_server_by_tag(cfg, "remote-dns").detour == "proxy-node"
     assert cfg.dns.rules == [
-        {"server": "remote-dns", "domain": ["engage.cloudflareclient.com"]},
+        {"server": "remote-dns", "domain": ["example.com", "engage.cloudflareclient.com"]},
         {"server": "bootstrap-dns", "domain": ["example.com"]},
     ]
 
@@ -215,7 +215,12 @@ async def test_build_bootstrap_stages_skips_when_next_layer_host_is_ip(tmp_path)
 
     stages = await builder.build_bootstrap_stages()
 
-    assert stages == []
+    assert len(stages) == 1
+    assert stages[0].resolve_hosts == ["example.com"]
+    assert stages[0].config.dns.rules == [
+        {"server": "remote-dns", "domain": ["example.com"]},
+        {"server": "bootstrap-dns", "domain": ["example.com"]},
+    ]
 
 
 @pytest.mark.asyncio
@@ -235,6 +240,7 @@ async def test_build_bootstrap_stages_skips_current_layer_bootstrap_rule_when_no
     stages = await builder.build_bootstrap_stages()
 
     assert len(stages) == 1
+    assert stages[0].resolve_hosts == ["engage.cloudflareclient.com"]
     assert stages[0].config.dns.rules == [{"server": "remote-dns", "domain": ["engage.cloudflareclient.com"]}]
 
 
@@ -255,6 +261,7 @@ async def test_build_config_injects_dynamic_hosts_predefined(tmp_path):
 
     cfg = await builder.build_config(
         predefined_hosts={
+            "example.com": ["203.0.113.1"],
             "engage.cloudflareclient.com": ["198.51.100.10", "2606:4700:4700::1111"],
             "162.159.193.10": ["162.159.193.10"],
         }
@@ -263,9 +270,31 @@ async def test_build_config_injects_dynamic_hosts_predefined(tmp_path):
     hosts_dns = _dns_server_by_tag(cfg, "hosts-dns")
     assert hosts_dns.type == "hosts"
     assert hosts_dns.predefined == {
+        "example.com": ["203.0.113.1"],
         "engage.cloudflareclient.com": ["198.51.100.10", "2606:4700:4700::1111"]
     }
-    assert cfg.dns.rules[0] == {"server": "hosts-dns", "domain": ["engage.cloudflareclient.com"]}
+    assert cfg.dns.rules[0] == {"server": "hosts-dns", "domain": ["example.com", "engage.cloudflareclient.com"]}
+    assert cfg.outbounds[1]["server"] == "203.0.113.1"
+    assert cfg.endpoints[0].peers[0].address == "198.51.100.10"
+
+
+@pytest.mark.asyncio
+async def test_build_config_keeps_warp_endpoint_host_when_predefined_hosts_missing(tmp_path):
+    builder, prefs, warp = await _create_builder_with_selected_node(tmp_path)
+    await prefs.update_preferences(warp_enabled=True, dns_leak_protection=True)
+    await warp.upsert_account(
+        private_key="pk",
+        local_address_v4="172.16.0.2",
+        local_address_v6="2606:4700:110::2",
+        reserved=json.dumps([1, 2, 3]),
+        peer_public_key="peer-public-key",
+        peer_endpoint_host="engage.cloudflareclient.com",
+        peer_endpoint_port=2408,
+        peer_allowed_ips=json.dumps(["0.0.0.0/0", "::/0"]),
+    )
+
+    cfg = await builder.build_config(predefined_hosts={"other.example.com": ["198.51.100.10"]})
+
     assert cfg.endpoints[0].peers[0].address == "engage.cloudflareclient.com"
 
 

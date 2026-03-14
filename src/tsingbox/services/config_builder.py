@@ -147,11 +147,21 @@ class ConfigBuilder:
             }
         ]
 
-    def _build_warp_endpoint(self, warp: WarpAccount) -> dict:
+    def _replace_host_with_predefined_ip(self, host: str, predefined_hosts: dict[str, list[str]] | None = None) -> str:
+        normalized_host = host.strip()
+        if not normalized_host or self._is_ip_address(normalized_host):
+            return normalized_host
+        resolved_addresses = (predefined_hosts or {}).get(normalized_host, [])
+        if resolved_addresses:
+            return resolved_addresses[0]
+        return normalized_host
+
+    def _build_warp_endpoint(self, warp: WarpAccount, predefined_hosts: dict[str, list[str]] | None = None) -> dict:
         peer_public_key = warp.peer_public_key or WARP_PEER_PUBLIC_KEY
         peer_endpoint_host = warp.peer_endpoint_host or WARP_ENDPOINT
         peer_endpoint_port = warp.peer_endpoint_port or WARP_PORT
         peer_allowed_ips = json.loads(warp.peer_allowed_ips) if warp.peer_allowed_ips else WARP_ALLOWED_IPS
+        peer_address = self._replace_host_with_predefined_ip(peer_endpoint_host, predefined_hosts)
 
         return {
             "type": "wireguard",
@@ -163,7 +173,7 @@ class ConfigBuilder:
             "private_key": warp.private_key,
             "peers": [
                 {
-                    "address": peer_endpoint_host,
+                    "address": peer_address,
                     "port": peer_endpoint_port,
                     "public_key": peer_public_key,
                     "allowed_ips": peer_allowed_ips,
@@ -209,10 +219,17 @@ class ConfigBuilder:
     def _collect_next_layer_hosts(self, context: BuildContext) -> list[str]:
         if not context.preferences.warp_enabled or context.warp_account is None:
             return []
+
+        hosts: list[str] = []
+        node_server = context.node_server.strip()
+        if node_server and not self._is_ip_address(node_server):
+            hosts.append(node_server)
+
         peer_endpoint_host = (context.warp_account.peer_endpoint_host or WARP_ENDPOINT).strip()
-        if not peer_endpoint_host or self._is_ip_address(peer_endpoint_host):
-            return []
-        return [peer_endpoint_host]
+        if peer_endpoint_host and not self._is_ip_address(peer_endpoint_host) and peer_endpoint_host not in hosts:
+            hosts.append(peer_endpoint_host)
+
+        return hosts
 
     def _build_bootstrap_stage_model(self, *, context: BuildContext, resolve_hosts: list[str]) -> SingBoxConfig:
         node_outbound = dict(context.node_outbound)
@@ -274,8 +291,9 @@ class ConfigBuilder:
         if context.preferences.warp_enabled and context.warp_account is not None:
             node_outbound = dict(context.node_outbound)
             node_outbound["tag"] = PROXY_NODE_TAG
+            node_outbound["server"] = self._replace_host_with_predefined_ip(context.node_server, normalized_hosts)
             outbounds.append(node_outbound)
-            endpoints.append(self._build_warp_endpoint(context.warp_account))
+            endpoints.append(self._build_warp_endpoint(context.warp_account, normalized_hosts))
             final_tag = WARP_ENDPOINT_TAG
             remote_dns_detour = WARP_ENDPOINT_TAG
         else:
