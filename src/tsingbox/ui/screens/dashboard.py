@@ -50,6 +50,7 @@ class DashboardScreen(Vertical):
             return
 
         if event.button.id == "refresh-dashboard":
+            await self.app.trigger_proxy_latency_refresh()  # type: ignore[attr-defined]
             await self.app.refresh_dashboard_state()  # type: ignore[attr-defined]
             return
 

@@ -13,6 +13,7 @@ from tsingbox.core.settings import Settings
 from tsingbox.ui.screens.config import ConfigScreen
 from tsingbox.ui.screens.dashboard import DashboardScreen
 from tsingbox.services.singbox_binary_service import SingboxBinaryCheckResult, SingboxBinaryStatus
+from tsingbox.services.proxy_latency_probe import ProxyProbeResult, ProxyProbeStatus
 from tsingbox.services.singbox_controller import ControlResult
 from conftest import create_initialized_app
 from textual.widgets import Button, Log, Static, Switch
@@ -161,6 +162,7 @@ async def test_get_dashboard_state_without_selected_node(tmp_path):
     assert state.inbound_port == "未提供"
     assert state.node_count == 0
     assert state.singbox_status == "stopped"
+    assert state.proxy_latency == "--"
     assert state.routing_mode == "rule"
     assert state.dns_leak_protection == "关闭"
     assert state.warp_enabled == "关闭"
@@ -225,6 +227,7 @@ async def test_get_dashboard_state_uses_running_status_and_missing_port_fallback
     state = await app.get_dashboard_state()
 
     assert state.singbox_status == "running"
+    assert state.proxy_latency == "未测试"
     assert state.node_port == "未提供"
     assert state.inbound_port == "未提供"
     assert state.routing_mode == "global"
@@ -328,6 +331,7 @@ async def test_apply_runtime_config_uses_resolved_binary(tmp_path):
     controller = RestartSuccessController()
     app.controller = controller
     app.ensure_singbox_binary_ready = fake_ready_check  # type: ignore[method-assign]
+    app._schedule_delayed_proxy_latency_refresh = mock.MagicMock()  # type: ignore[method-assign]
     await app.database.initialize()
 
     ok, msg = await app.apply_runtime_config()
@@ -336,6 +340,31 @@ async def test_apply_runtime_config_uses_resolved_binary(tmp_path):
     assert controller.binary == "/custom/bin/sing-box"
     assert controller.restart_calls == [app.settings.runtime_config_path]
     assert msg == "配置已应用并重启 sing-box"
+    app._schedule_delayed_proxy_latency_refresh.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_schedule_delayed_proxy_latency_refresh_cancels_previous_task():
+    app = TSingBoxApp()
+
+    first_task = mock.MagicMock()
+    app._delayed_proxy_probe_task = first_task
+
+    created_tasks: list[object] = []
+    original_create_task = asyncio.create_task
+
+    def fake_create_task(coro):
+        task = mock.MagicMock()
+        created_tasks.append(task)
+        coro.close()
+        return task
+
+    with mock.patch("asyncio.create_task", side_effect=fake_create_task):
+        app._schedule_delayed_proxy_latency_refresh()
+
+    first_task.cancel.assert_called_once()
+    assert len(created_tasks) == 1
+    assert app._delayed_proxy_probe_task is created_tasks[0]
 
 
 @pytest.mark.asyncio
@@ -343,7 +372,8 @@ async def test_apply_runtime_config_uses_resolved_binary(tmp_path):
 @mock.patch("asyncio.open_connection")
 async def test_apply_runtime_config_runs_stage_flow_for_warp_domain(mock_open_conn, mock_sleep, tmp_path):
     # Mock open_connection to simulate a ready proxy port
-    mock_writer = mock.AsyncMock()
+    mock_writer = mock.MagicMock()
+    mock_writer.wait_closed = mock.AsyncMock()
     mock_open_conn.return_value = (mock.AsyncMock(), mock_writer)
 
     app = TSingBoxApp()
@@ -384,7 +414,8 @@ async def test_apply_runtime_config_runs_stage_flow_for_warp_domain(mock_open_co
 @mock.patch("asyncio.open_connection")
 async def test_apply_runtime_config_keeps_old_runtime_when_stage_resolution_fails(mock_open_conn, mock_sleep, tmp_path):
     # Mock open_connection to simulate a ready proxy port
-    mock_writer = mock.AsyncMock()
+    mock_writer = mock.MagicMock()
+    mock_writer.wait_closed = mock.AsyncMock()
     mock_open_conn.return_value = (mock.AsyncMock(), mock_writer)
 
     app = TSingBoxApp()
@@ -526,6 +557,70 @@ async def test_dashboard_screen_shows_inbound_port_from_runtime_config(tmp_path)
 
         inbound = app.query_one("#dashboard-inbound-port", Static)
         assert str(inbound.render()) == "本地代理端口: 7890"
+
+
+@pytest.mark.asyncio
+async def test_footer_shows_proxy_latency_when_probe_succeeds(tmp_path):
+    app = await create_initialized_app(tmp_path)
+    app._start_proxy_probe_worker = lambda: None  # type: ignore[method-assign]
+    app._schedule_startup_tasks = lambda: None  # type: ignore[method-assign]
+    app.trigger_proxy_latency_refresh = mock.AsyncMock()  # type: ignore[method-assign]
+    app.settings.runtime_config_path.write_text('{"inbounds":[{"listen_port":7890}]}', encoding="utf-8")
+    app._proxy_probe_result = ProxyProbeResult(status=ProxyProbeStatus.OK, latency_ms=183)
+    app.controller.status = lambda: "running"  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        footer = app.query_one("#footer-status", Static)
+        rendered = str(footer.render())
+        assert "sing-box: running" in rendered
+        assert "代理延迟: 183ms" in rendered
+
+
+@pytest.mark.asyncio
+async def test_footer_shows_proxy_unavailable_when_probe_fails(tmp_path):
+    app = await create_initialized_app(tmp_path)
+    app._start_proxy_probe_worker = lambda: None  # type: ignore[method-assign]
+    app._schedule_startup_tasks = lambda: None  # type: ignore[method-assign]
+    app.trigger_proxy_latency_refresh = mock.AsyncMock()  # type: ignore[method-assign]
+    app.settings.runtime_config_path.write_text('{"inbounds":[{"listen_port":7890}]}', encoding="utf-8")
+    app._proxy_probe_result = ProxyProbeResult(status=ProxyProbeStatus.UNAVAILABLE)
+    app.controller.status = lambda: "running"  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        footer = app.query_one("#footer-status", Static)
+        assert "代理延迟: 不可用" in str(footer.render())
+
+
+@pytest.mark.asyncio
+async def test_dashboard_refresh_triggers_proxy_probe_and_updates_footer(tmp_path):
+    app = await create_initialized_app(tmp_path)
+    app._start_proxy_probe_worker = lambda: None  # type: ignore[method-assign]
+    app._schedule_startup_tasks = lambda: None  # type: ignore[method-assign]
+    app.settings.runtime_config_path.write_text('{"inbounds":[{"listen_port":7890}]}', encoding="utf-8")
+    app.controller.status = lambda: "running"  # type: ignore[method-assign]
+
+    calls: list[str] = []
+
+    async def fake_probe(*, proxy_url: str):
+        calls.append(proxy_url)
+        return ProxyProbeResult(status=ProxyProbeStatus.OK, latency_ms=188)
+
+    app.proxy_latency_probe.probe = fake_probe  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        calls.clear()
+
+        await pilot.click("#refresh-dashboard")
+        await pilot.pause()
+        await pilot.pause()
+
+        footer = app.query_one("#footer-status", Static)
+        rendered = str(footer.render())
+        assert calls == ["http://127.0.0.1:7890"]
+        assert "代理延迟: 188ms" in rendered
 
 
 @pytest.mark.asyncio

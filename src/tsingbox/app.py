@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from contextlib import suppress
 
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.containers import Container, Vertical
@@ -20,6 +21,7 @@ from tsingbox.data.repositories.preferences import PreferencesRepository
 from tsingbox.data.repositories.subscriptions import SubscriptionsRepository
 from tsingbox.data.repositories.warp_accounts import WarpAccountsRepository
 from tsingbox.services.config_builder import ConfigBuilder
+from tsingbox.services.proxy_latency_probe import ProxyLatencyProbe, ProxyProbeResult, ProxyProbeStatus
 from tsingbox.services.singbox_binary_service import SingboxBinaryCheckResult, SingboxBinaryService
 from tsingbox.services.singbox_controller import SingboxController
 from tsingbox.services.subscription_manager import SubscriptionManager
@@ -45,6 +47,7 @@ class DashboardState:
     inbound_port: str
     node_count: int
     singbox_status: str
+    proxy_latency: str
     routing_mode: str
     dns_leak_protection: str
     warp_enabled: str
@@ -131,6 +134,7 @@ class TSingBoxApp(App[None]):
         self.singbox_binary_service = SingboxBinaryService()
         self.warp_generator = WarpGenerator(self.warp_repo, log_callback=self.append_log)
         self.warp_bootstrap_resolver = WarpBootstrapResolver(self.warp_repo, log_callback=self.append_log)
+        self.proxy_latency_probe = ProxyLatencyProbe()
 
         self.logs: list[str] = []
         self._screen_map: dict[str, Screen] = {}
@@ -143,6 +147,13 @@ class TSingBoxApp(App[None]):
         self.apply_status_message: str | None = None
         self._startup_worker_scheduled = False
         self._apply_lock = asyncio.Lock()
+        self._proxy_probe_lock = asyncio.Lock()
+        self._proxy_probe_task: asyncio.Task[None] | None = None
+        self._delayed_proxy_probe_task: asyncio.Task[None] | None = None
+        self._proxy_probe_stop = asyncio.Event()
+        self._proxy_probe_interval = 30.0
+        self._proxy_probe_delay_after_restart = 3.0
+        self._proxy_probe_result = ProxyProbeResult(status=ProxyProbeStatus.UNTESTED)
         self.dashboard_state = DashboardState(
             subscription_name="未选择",
             subscription_updated_at="未更新",
@@ -152,6 +163,7 @@ class TSingBoxApp(App[None]):
             inbound_port="未提供",
             node_count=0,
             singbox_status="stopped",
+            proxy_latency="--",
             routing_mode="rule",
             dns_leak_protection="关闭",
             warp_enabled="关闭",
@@ -187,9 +199,19 @@ class TSingBoxApp(App[None]):
         }
         self.show_screen("dashboard")
         await self.refresh_dashboard_state()
+        self._start_proxy_probe_worker()
         self._schedule_startup_tasks()
 
     async def on_unmount(self) -> None:
+        self._proxy_probe_stop.set()
+        if self._proxy_probe_task is not None:
+            self._proxy_probe_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._proxy_probe_task
+        if self._delayed_proxy_probe_task is not None:
+            self._delayed_proxy_probe_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._delayed_proxy_probe_task
         await self.controller.stop()
 
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
@@ -210,6 +232,8 @@ class TSingBoxApp(App[None]):
         await self.request_apply(reason="action")
 
     async def action_refresh(self) -> None:
+        if self.current_screen_name != "dashboard":
+            await self.trigger_proxy_latency_refresh()
         await self.refresh_current_screen()
 
     def show_screen(self, name: str) -> None:
@@ -224,6 +248,7 @@ class TSingBoxApp(App[None]):
 
     async def refresh_current_screen(self) -> None:
         if self.current_screen_name == "dashboard":
+            await self.trigger_proxy_latency_refresh()
             await self.refresh_dashboard_state()
             dashboard = self.query_one("#dashboard", DashboardScreen)
             dashboard.focus_primary_action()
@@ -255,6 +280,7 @@ class TSingBoxApp(App[None]):
         )
         selected_subscription = self._find_subscription(subscriptions, selected_node)
 
+        singbox_status = self._get_singbox_status()
         return DashboardState(
             subscription_name=selected_subscription.name if selected_subscription else "未选择",
             subscription_updated_at=self._format_subscription_update(selected_subscription),
@@ -263,7 +289,8 @@ class TSingBoxApp(App[None]):
             node_port=self._extract_node_port(selected_node),
             inbound_port=self._extract_inbound_port(),
             node_count=len(all_nodes),
-            singbox_status=self._get_singbox_status(),
+            singbox_status=singbox_status,
+            proxy_latency=self._format_proxy_latency(singbox_status),
             routing_mode=preferences.routing_mode,
             dns_leak_protection="开启" if preferences.dns_leak_protection else "关闭",
             warp_enabled="开启" if preferences.warp_enabled else "关闭",
@@ -336,6 +363,68 @@ class TSingBoxApp(App[None]):
             return str(status_method())
         return "stopped"
 
+    def _format_proxy_latency(self, singbox_status: str) -> str:
+        if singbox_status != "running":
+            return "--"
+        return self._proxy_probe_result.display_text
+
+    async def trigger_proxy_latency_refresh(self) -> None:
+        if self._proxy_probe_lock.locked():
+            return
+        await self._refresh_proxy_latency()
+
+    def _start_proxy_probe_worker(self) -> None:
+        if self._proxy_probe_task is not None:
+            return
+        self._proxy_probe_stop.clear()
+        self._proxy_probe_task = asyncio.create_task(self._proxy_probe_loop())
+
+    def _schedule_delayed_proxy_latency_refresh(self) -> None:
+        if self._delayed_proxy_probe_task is not None:
+            self._delayed_proxy_probe_task.cancel()
+        self._delayed_proxy_probe_task = asyncio.create_task(self._run_delayed_proxy_latency_refresh())
+
+    async def _run_delayed_proxy_latency_refresh(self) -> None:
+        try:
+            await asyncio.sleep(self._proxy_probe_delay_after_restart)
+            if self._proxy_probe_stop.is_set():
+                return
+            await self.trigger_proxy_latency_refresh()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            current = asyncio.current_task()
+            if self._delayed_proxy_probe_task is current:
+                self._delayed_proxy_probe_task = None
+
+    async def _proxy_probe_loop(self) -> None:
+        while not self._proxy_probe_stop.is_set():
+            await self._refresh_proxy_latency()
+            try:
+                await asyncio.wait_for(self._proxy_probe_stop.wait(), timeout=self._proxy_probe_interval)
+            except asyncio.TimeoutError:
+                continue
+
+    async def _refresh_proxy_latency(self) -> None:
+        async with self._proxy_probe_lock:
+            singbox_status = self._get_singbox_status()
+            if singbox_status != "running":
+                self._proxy_probe_result = ProxyProbeResult(status=ProxyProbeStatus.UNTESTED)
+                await self.refresh_dashboard_state()
+                return
+
+            inbound_port = self._extract_inbound_port()
+            if not inbound_port.isdigit():
+                self._proxy_probe_result = ProxyProbeResult(status=ProxyProbeStatus.UNTESTED)
+                await self.refresh_dashboard_state()
+                return
+
+            self._proxy_probe_result = ProxyProbeResult(status=ProxyProbeStatus.TESTING)
+            await self.refresh_dashboard_state()
+            proxy_url = f"http://127.0.0.1:{inbound_port}"
+            self._proxy_probe_result = await self.proxy_latency_probe.probe(proxy_url=proxy_url)
+            await self.refresh_dashboard_state()
+
     def _can_query_ui(self) -> bool:
         if not self.is_mounted:
             return False
@@ -361,6 +450,7 @@ class TSingBoxApp(App[None]):
         footer.update_status(
             current_screen=self.SCREEN_LABELS.get(self.current_screen_name, self.current_screen_name),
             singbox_status=self.dashboard_state.singbox_status,
+            proxy_latency=self.dashboard_state.proxy_latency,
             last_message=self._current_status_message(),
         )
 
@@ -619,6 +709,7 @@ class TSingBoxApp(App[None]):
 
         result = await self.controller.restart(self.settings.runtime_config_path)
         if result.ok:
+            self._schedule_delayed_proxy_latency_refresh()
             return await self._finalize_runtime_apply(True, "配置已应用并重启 sing-box")
         return await self._finalize_runtime_apply(
             False,
