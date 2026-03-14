@@ -11,7 +11,7 @@ class NodesRepository:
     async def list_nodes(self) -> list[Node]:
         async with self.database.connect() as conn:
             cursor = await conn.execute(
-                "SELECT id, sub_id, tag, protocol, config_json, ping_delay FROM nodes ORDER BY id DESC"
+                "SELECT id, sub_id, tag, protocol, config_json, ping_delay FROM nodes ORDER BY id ASC"
             )
             rows = await cursor.fetchall()
         return [

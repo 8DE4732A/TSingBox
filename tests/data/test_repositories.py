@@ -31,6 +31,7 @@ async def test_subscription_replace_nodes_transaction(tmp_path):
     )
     first = await nodes.list_nodes()
     assert len(first) == 2
+    assert [node.tag for node in first] == ["a", "b"]
 
     await subs.upsert_and_replace_nodes(
         name="demo",

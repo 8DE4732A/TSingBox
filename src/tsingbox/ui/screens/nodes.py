@@ -162,8 +162,8 @@ class NodesScreen(Vertical):
             return
 
         current_nodes = self._nodes_by_subscription.get(self._active_sub_id, [])
-        for node in current_nodes:
-            option_list.add_option(Option(f"{node.tag} ({node.protocol})", id=str(node.id)))
+        for index, node in enumerate(current_nodes, start=1):
+            option_list.add_option(Option(f"{index}. {node.tag} ({node.protocol})", id=str(node.id)))
             self._current_node_ids.append(node.id)
 
         self._restore_highlight_for_current_subscription(current_nodes)
