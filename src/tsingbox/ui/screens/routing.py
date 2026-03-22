@@ -13,7 +13,7 @@ class RoutingScreen(Vertical):
             yield Switch(value=False, id="dns-leak")
             yield Static("sing-box 路径")
             yield Input(placeholder="支持完整可执行文件路径或所在目录", id="singbox-binary-path")
-            yield Static("指定 sing-box 所在目录或可执行文件路径", classes="help-text")
+            yield Static('指定 sing-box 所在目录或可执行文件路径（也可前往"内核"页下载管理）', classes="help-text")
             yield Button("保存设置", id="save-routing", variant="primary")
             yield Static("", id="routing-status")
 

@@ -34,6 +34,8 @@ class Database:
             preference_columns = {row["name"] for row in await cursor.fetchall()}
             if "singbox_binary_path" not in preference_columns:
                 await conn.execute("ALTER TABLE preferences ADD COLUMN singbox_binary_path TEXT")
+            if "singbox_active_version" not in preference_columns:
+                await conn.execute("ALTER TABLE preferences ADD COLUMN singbox_active_version TEXT")
 
             cursor = await conn.execute("PRAGMA table_info(warp_accounts)")
             warp_columns = {row["name"] for row in await cursor.fetchall()}
@@ -49,7 +51,7 @@ class Database:
             await conn.execute(
                 """
                 INSERT OR IGNORE INTO preferences (
-                    id, selected_node_id, routing_mode, dns_leak_protection, warp_enabled, singbox_binary_path
-                ) VALUES (1, NULL, 'rule', 0, 0, NULL)
+                    id, selected_node_id, routing_mode, dns_leak_protection, warp_enabled, singbox_binary_path, singbox_active_version
+                ) VALUES (1, NULL, 'rule', 0, 0, NULL, NULL)
                 """
             )

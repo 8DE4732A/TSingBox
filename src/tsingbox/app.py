@@ -24,6 +24,7 @@ from tsingbox.services.config_builder import ConfigBuilder
 from tsingbox.services.proxy_latency_probe import ProxyLatencyProbe, ProxyProbeResult, ProxyProbeStatus
 from tsingbox.services.singbox_binary_service import SingboxBinaryCheckResult, SingboxBinaryService
 from tsingbox.services.singbox_controller import SingboxController
+from tsingbox.services.singbox_version_manager import SingboxVersionManager
 from tsingbox.services.subscription_manager import SubscriptionManager
 from tsingbox.services.warp_bootstrap_resolver import WarpBootstrapResolver
 from tsingbox.services.warp_generator import WarpGenerator
@@ -32,6 +33,7 @@ from tsingbox.ui.screens.dashboard import DashboardScreen
 from tsingbox.ui.screens.logs import LogsScreen
 from tsingbox.ui.screens.nodes import NodesScreen
 from tsingbox.ui.screens.routing import RoutingScreen
+from tsingbox.ui.screens.singbox_versions import SingboxVersionsScreen
 from tsingbox.ui.screens.subscriptions import SubscriptionsScreen
 from tsingbox.ui.screens.warp import WarpScreen
 from tsingbox.ui.widgets.status_footer import StatusFooter
@@ -95,8 +97,9 @@ class TSingBoxApp(App[None]):
         ("3", "go('nodes')", "节点"),
         ("4", "go('routing')", "设置"),
         ("5", "go('warp')", "WARP"),
-        ("6", "go('config')", "配置"),
-        ("7", "go('logs')", "日志"),
+        ("6", "go('singbox_versions')", "内核"),
+        ("7", "go('config')", "配置"),
+        ("8", "go('logs')", "日志"),
         ("a", "apply", "应用"),
         ("r", "refresh", "刷新"),
         ("escape", "dashboard", "返回总览"),
@@ -108,6 +111,7 @@ class TSingBoxApp(App[None]):
         "nodes": "节点",
         "routing": "设置",
         "warp": "WARP",
+        "singbox_versions": "内核",
         "config": "配置",
         "logs": "日志",
     }
@@ -132,6 +136,10 @@ class TSingBoxApp(App[None]):
         )
         self.controller = SingboxController(log_callback=self.append_log)
         self.singbox_binary_service = SingboxBinaryService()
+        self.version_manager = SingboxVersionManager(
+            versions_dir=self.settings.versions_dir,
+            log_callback=self.append_log,
+        )
         self.warp_generator = WarpGenerator(self.warp_repo, log_callback=self.append_log)
         self.warp_bootstrap_resolver = WarpBootstrapResolver(self.warp_repo, log_callback=self.append_log)
         self.proxy_latency_probe = ProxyLatencyProbe()
@@ -181,6 +189,7 @@ class TSingBoxApp(App[None]):
                 yield NodesScreen(id="nodes")
                 yield RoutingScreen(id="routing")
                 yield WarpScreen(id="warp")
+                yield SingboxVersionsScreen(id="singbox_versions")
                 yield ConfigScreen(id="config")
                 yield LogsScreen(id="logs")
         yield StatusFooter()
@@ -194,6 +203,7 @@ class TSingBoxApp(App[None]):
             "nodes": self.query_one("#nodes", NodesScreen),
             "routing": self.query_one("#routing", RoutingScreen),
             "warp": self.query_one("#warp", WarpScreen),
+            "singbox_versions": self.query_one("#singbox_versions", SingboxVersionsScreen),
             "config": self.query_one("#config", ConfigScreen),
             "logs": self.query_one("#logs", LogsScreen),
         }
@@ -523,7 +533,9 @@ class TSingBoxApp(App[None]):
 
     async def ensure_singbox_binary_ready(self) -> tuple[bool, str | None, SingboxBinaryCheckResult]:
         preferences = await self.preferences_repo.get_preferences()
-        result = self.singbox_binary_service.resolve_binary(preferences)
+        result = self.singbox_binary_service.resolve_binary(
+            preferences, versions_dir=self.settings.versions_dir
+        )
         if result.ok:
             return True, result.binary_path, result
         return False, None, result

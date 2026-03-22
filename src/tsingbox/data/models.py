@@ -43,3 +43,4 @@ class Preferences:
     dns_leak_protection: bool
     warp_enabled: bool
     singbox_binary_path: str | None
+    singbox_active_version: str | None = None

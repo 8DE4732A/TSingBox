@@ -32,7 +32,12 @@ class Settings:
     def app_log_path(self) -> Path:
         return self.logs_dir / "app.log"
 
+    @property
+    def versions_dir(self) -> Path:
+        return self.base_dir / "versions"
+
     def ensure_dirs(self) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.versions_dir.mkdir(parents=True, exist_ok=True)

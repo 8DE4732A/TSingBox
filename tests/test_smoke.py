@@ -58,6 +58,7 @@ async def test_tabs_order_places_config_before_logs(tmp_path):
             "节点",
             "设置",
             "WARP",
+            "内核",
             "配置",
             "日志",
         ]
@@ -68,14 +69,14 @@ async def test_number_key_switches_screen_and_tab(tmp_path):
     app = await create_initialized_app(tmp_path)
 
     async with app.run_test() as pilot:
-        await pilot.press("6")
+        await pilot.press("7")
         await pilot.pause()
 
         tabs = app.query_one("#tabs", Tabs)
         assert app.current_screen_name == "config"
         assert tabs.active == "tab-config"
 
-        await pilot.press("7")
+        await pilot.press("8")
         await pilot.pause()
 
         assert app.current_screen_name == "logs"

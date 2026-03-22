@@ -466,7 +466,7 @@ async def test_apply_runtime_config_skips_stage_flow_when_no_bootstrap_stage(tmp
 async def test_startup_check_sets_message_when_system_binary_missing(tmp_path):
     app = await create_initialized_app(tmp_path)
 
-    app.singbox_binary_service.resolve_binary = lambda preferences: SingboxBinaryCheckResult(  # type: ignore[method-assign]
+    app.singbox_binary_service.resolve_binary = lambda preferences, **kwargs: SingboxBinaryCheckResult(  # type: ignore[method-assign]
         status=SingboxBinaryStatus.PATH_NOT_FOUND,
         binary_path=None,
         configured_path=None,
@@ -530,7 +530,7 @@ async def test_config_screen_refresh_reads_latest_runtime_config(tmp_path):
     app.settings.runtime_config_path.write_text('{"first":1}', encoding="utf-8")
 
     async with app.run_test() as pilot:
-        await pilot.press("6")
+        await pilot.press("7")
         await pilot.pause()
 
         status = app.query_one("#config-status", Static)
@@ -628,7 +628,7 @@ async def test_logs_screen_appends_new_log_line_without_full_refresh(tmp_path):
     app = await create_initialized_app(tmp_path)
 
     async with app.run_test() as pilot:
-        await pilot.press("7")
+        await pilot.press("8")
         await pilot.pause()
 
         content = app.query_one("#logs-content", Log)
@@ -645,7 +645,7 @@ async def test_logs_screen_appends_new_log_line_without_full_refresh(tmp_path):
 async def test_startup_check_sets_message_when_configured_binary_invalid(tmp_path):
     app = await create_initialized_app(tmp_path)
 
-    app.singbox_binary_service.resolve_binary = lambda preferences: SingboxBinaryCheckResult(  # type: ignore[method-assign]
+    app.singbox_binary_service.resolve_binary = lambda preferences, **kwargs: SingboxBinaryCheckResult(  # type: ignore[method-assign]
         status=SingboxBinaryStatus.CONFIGURED_NOT_FOUND,
         binary_path=None,
         configured_path="/missing/sing-box",
@@ -710,7 +710,7 @@ async def test_startup_tasks_run_in_background_without_blocking_initial_render(t
         assert str(apply_status.render()) == "启动中：正在后台应用已选节点"
         assert "状态: 启动中：正在后台应用已选节点" in str(footer.render())
 
-        await pilot.press("7")
+        await pilot.press("8")
         await pilot.pause()
 
         logs = app.query_one("#logs-content", Log)

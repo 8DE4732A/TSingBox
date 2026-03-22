@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS preferences (
     routing_mode TEXT NOT NULL DEFAULT 'rule',
     dns_leak_protection INTEGER NOT NULL DEFAULT 0,
     warp_enabled INTEGER NOT NULL DEFAULT 0,
-    singbox_binary_path TEXT
+    singbox_binary_path TEXT,
+    singbox_active_version TEXT
 );
 """
