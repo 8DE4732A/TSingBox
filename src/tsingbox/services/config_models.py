@@ -32,9 +32,18 @@ class RouteRule(BaseModel):
     outbound: str
 
 
+class RuleSetConfigEntry(BaseModel):
+    type: str = "remote"
+    tag: str
+    format: str = "binary"
+    url: str
+    download_detour: str
+
+
 class RouteConfig(BaseModel):
     final: str
     rules: list[dict[str, Any] | RouteRule] = Field(default_factory=list)
+    rule_set: list[RuleSetConfigEntry] = Field(default_factory=list)
     default_domain_resolver: dict[str, Any] | None = None
 
 
@@ -55,6 +64,14 @@ class DNSConfig(BaseModel):
     final: str | None = None
 
 
+class CacheFileConfig(BaseModel):
+    enabled: bool = True
+
+
+class ExperimentalConfig(BaseModel):
+    cache_file: CacheFileConfig = Field(default_factory=CacheFileConfig)
+
+
 class SingBoxConfig(BaseModel):
     log: dict[str, Any] = Field(default_factory=lambda: {"level": "info"})
     dns: DNSConfig = Field(default_factory=DNSConfig)
@@ -62,3 +79,4 @@ class SingBoxConfig(BaseModel):
     outbounds: list[dict[str, Any]]
     endpoints: list[WireGuardEndpoint] = Field(default_factory=list)
     route: RouteConfig
+    experimental: ExperimentalConfig = Field(default_factory=ExperimentalConfig)

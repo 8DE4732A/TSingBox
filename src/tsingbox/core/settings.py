@@ -36,8 +36,13 @@ class Settings:
     def versions_dir(self) -> Path:
         return self.base_dir / "versions"
 
+    @property
+    def rule_files_dir(self) -> Path:
+        return self.base_dir / "rule-files"
+
     def ensure_dirs(self) -> None:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.versions_dir.mkdir(parents=True, exist_ok=True)
+        self.rule_files_dir.mkdir(parents=True, exist_ok=True)

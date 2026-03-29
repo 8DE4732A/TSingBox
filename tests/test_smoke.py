@@ -47,7 +47,7 @@ async def test_click_tab_switches_screen(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_tabs_order_places_config_before_logs(tmp_path):
+async def test_tabs_order_places_rules_between_settings_and_warp(tmp_path):
     app = await create_initialized_app(tmp_path)
 
     async with app.run_test() as pilot:
@@ -57,6 +57,7 @@ async def test_tabs_order_places_config_before_logs(tmp_path):
             "订阅",
             "节点",
             "设置",
+            "规则",
             "WARP",
             "内核",
             "配置",
@@ -73,10 +74,16 @@ async def test_number_key_switches_screen_and_tab(tmp_path):
         await pilot.pause()
 
         tabs = app.query_one("#tabs", Tabs)
+        assert app.current_screen_name == "singbox_versions"
+        assert tabs.active == "tab-singbox_versions"
+
+        await pilot.press("8")
+        await pilot.pause()
+
         assert app.current_screen_name == "config"
         assert tabs.active == "tab-config"
 
-        await pilot.press("8")
+        await pilot.press("9")
         await pilot.pause()
 
         assert app.current_screen_name == "logs"
@@ -251,7 +258,7 @@ async def test_warp_screen_structure_uses_account_panel_and_no_save_button(tmp_p
     app = await create_initialized_app(tmp_path)
 
     async with app.run_test() as pilot:
-        await pilot.press("5")
+        await pilot.press("6")
         await pilot.pause()
 
         screen = app.query_one("#warp", WarpScreen)

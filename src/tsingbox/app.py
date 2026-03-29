@@ -18,10 +18,14 @@ from tsingbox.data.db import Database
 from tsingbox.data.models import Node, Subscription
 from tsingbox.data.repositories.nodes import NodesRepository
 from tsingbox.data.repositories.preferences import PreferencesRepository
+from tsingbox.data.repositories.rule_files import RuleFilesRepository
+from tsingbox.data.repositories.routing_rules import RoutingRulesRepository
+from tsingbox.data.repositories.routing_rule_sets import RoutingRuleSetsRepository
 from tsingbox.data.repositories.subscriptions import SubscriptionsRepository
 from tsingbox.data.repositories.warp_accounts import WarpAccountsRepository
 from tsingbox.services.config_builder import ConfigBuilder
 from tsingbox.services.proxy_latency_probe import ProxyLatencyProbe, ProxyProbeResult, ProxyProbeStatus
+from tsingbox.services.rule_file_service import RuleFileService
 from tsingbox.services.singbox_binary_service import SingboxBinaryCheckResult, SingboxBinaryService
 from tsingbox.services.singbox_controller import SingboxController
 from tsingbox.services.singbox_version_manager import SingboxVersionManager
@@ -32,7 +36,8 @@ from tsingbox.ui.screens.config import ConfigScreen
 from tsingbox.ui.screens.dashboard import DashboardScreen
 from tsingbox.ui.screens.logs import LogsScreen
 from tsingbox.ui.screens.nodes import NodesScreen
-from tsingbox.ui.screens.routing import RoutingScreen
+from tsingbox.ui.screens.rules import RulesScreen
+from tsingbox.ui.screens.settings import SettingsScreen
 from tsingbox.ui.screens.singbox_versions import SingboxVersionsScreen
 from tsingbox.ui.screens.subscriptions import SubscriptionsScreen
 from tsingbox.ui.screens.warp import WarpScreen
@@ -95,11 +100,12 @@ class TSingBoxApp(App[None]):
         ("1", "go('dashboard')", "总览"),
         ("2", "go('subscriptions')", "订阅"),
         ("3", "go('nodes')", "节点"),
-        ("4", "go('routing')", "设置"),
-        ("5", "go('warp')", "WARP"),
-        ("6", "go('singbox_versions')", "内核"),
-        ("7", "go('config')", "配置"),
-        ("8", "go('logs')", "日志"),
+        ("4", "go('settings')", "设置"),
+        ("5", "go('rules')", "规则"),
+        ("6", "go('warp')", "WARP"),
+        ("7", "go('singbox_versions')", "内核"),
+        ("8", "go('config')", "配置"),
+        ("9", "go('logs')", "日志"),
         ("a", "apply", "应用"),
         ("r", "refresh", "刷新"),
         ("escape", "dashboard", "返回总览"),
@@ -109,7 +115,8 @@ class TSingBoxApp(App[None]):
         "dashboard": "总览",
         "subscriptions": "订阅",
         "nodes": "节点",
-        "routing": "设置",
+        "settings": "设置",
+        "rules": "规则",
         "warp": "WARP",
         "singbox_versions": "内核",
         "config": "配置",
@@ -124,15 +131,22 @@ class TSingBoxApp(App[None]):
         self.nodes_repo = NodesRepository(self.database)
         self.warp_repo = WarpAccountsRepository(self.database)
         self.preferences_repo = PreferencesRepository(self.database)
+        self.rule_files_repo = RuleFilesRepository(self.database)
+        self.routing_rule_sets_repo = RoutingRuleSetsRepository(self.database)
+        self.routing_rules_repo = RoutingRulesRepository(self.database)
 
         self.subscription_manager = SubscriptionManager(
             subscriptions_repo=self.subscriptions_repo,
             nodes_repo=self.nodes_repo,
         )
+        self.rule_file_service = RuleFileService(repository=self.rule_files_repo)
         self.config_builder = ConfigBuilder(
             nodes_repo=self.nodes_repo,
             preferences_repo=self.preferences_repo,
+            routing_rule_sets_repo=self.routing_rule_sets_repo,
+            routing_rules_repo=self.routing_rules_repo,
             warp_repo=self.warp_repo,
+            rule_file_service=self.rule_file_service,
         )
         self.controller = SingboxController(log_callback=self.append_log)
         self.singbox_binary_service = SingboxBinaryService()
@@ -187,7 +201,8 @@ class TSingBoxApp(App[None]):
                 yield DashboardScreen(id="dashboard")
                 yield SubscriptionsScreen(id="subscriptions")
                 yield NodesScreen(id="nodes")
-                yield RoutingScreen(id="routing")
+                yield SettingsScreen(id="settings")
+                yield RulesScreen(id="rules")
                 yield WarpScreen(id="warp")
                 yield SingboxVersionsScreen(id="singbox_versions")
                 yield ConfigScreen(id="config")
@@ -201,7 +216,8 @@ class TSingBoxApp(App[None]):
             "dashboard": self.query_one("#dashboard", DashboardScreen),
             "subscriptions": self.query_one("#subscriptions", SubscriptionsScreen),
             "nodes": self.query_one("#nodes", NodesScreen),
-            "routing": self.query_one("#routing", RoutingScreen),
+            "settings": self.query_one("#settings", SettingsScreen),
+            "rules": self.query_one("#rules", RulesScreen),
             "warp": self.query_one("#warp", WarpScreen),
             "singbox_versions": self.query_one("#singbox_versions", SingboxVersionsScreen),
             "config": self.query_one("#config", ConfigScreen),
@@ -589,7 +605,6 @@ class TSingBoxApp(App[None]):
             "action": "快捷键应用",
             "manual": "手动应用",
         }
-        owner_label = source_labels.get(source, source)
         if self._apply_lock.locked():
             active_owner = source_labels.get(self.apply_owner or "", self.apply_owner or "未知来源")
             msg = f"已有应用任务进行中（来源: {active_owner}）"
