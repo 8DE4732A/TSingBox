@@ -44,3 +44,42 @@ class Preferences:
     warp_enabled: bool
     singbox_binary_path: str | None
     singbox_active_version: str | None = None
+    active_routing_rule_set_id: int | None = None
+    rule_set_url_proxy_prefix: str | None = None
+
+
+@dataclass(slots=True)
+class RoutingRuleSet:
+    id: int
+    name: str
+    is_builtin: bool
+    is_default: bool
+    enabled: bool
+    sort_order: int
+
+
+@dataclass(slots=True)
+class RoutingRule:
+    id: int
+    rule_set_id: int
+    match_type: str
+    match_value: str
+    action: str
+    sort_order: int
+    enabled: bool
+
+
+@dataclass(slots=True)
+class RuleFile:
+    id: int
+    name: str
+    tag: str
+    format: str
+    url: str
+    download_detour: str | None
+    is_builtin: bool
+    auto_enabled: bool
+    enabled: bool
+    local_path: str | None
+    managed: bool
+    updated_at: datetime

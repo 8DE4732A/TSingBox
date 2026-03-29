@@ -7,6 +7,9 @@ from tsingbox.core.settings import Settings
 from tsingbox.data.db import Database
 from tsingbox.data.repositories.nodes import NodesRepository
 from tsingbox.data.repositories.preferences import PreferencesRepository
+from tsingbox.data.repositories.rule_files import RuleFilesRepository
+from tsingbox.data.repositories.routing_rules import RoutingRulesRepository
+from tsingbox.data.repositories.routing_rule_sets import RoutingRuleSetsRepository
 from tsingbox.data.repositories.subscriptions import SubscriptionsRepository
 from tsingbox.data.repositories.warp_accounts import WarpAccountsRepository
 
@@ -74,14 +77,17 @@ async def test_warp_and_preferences_repo(tmp_path):
     assert loaded.peer_allowed_ips == json.dumps(["0.0.0.0/0", "::/0"])
 
     pref = await pref_repo.get_preferences()
-    assert pref.routing_mode == "rule"
+    assert pref.routing_mode == "global"
     assert pref.singbox_binary_path is None
+    assert pref.rule_set_url_proxy_prefix is None
 
     await pref_repo.update_preferences(
         routing_mode="global",
         dns_leak_protection=True,
         warp_enabled=True,
         singbox_binary_path="/opt/homebrew/bin/sing-box",
+        active_routing_rule_set_id=1,
+        rule_set_url_proxy_prefix="https://ghfast.top/",
     )
     await pref_repo.set_selected_node(99)
     updated = await pref_repo.get_preferences()
@@ -90,10 +96,13 @@ async def test_warp_and_preferences_repo(tmp_path):
     assert updated.warp_enabled is True
     assert updated.selected_node_id == 99
     assert updated.singbox_binary_path == "/opt/homebrew/bin/sing-box"
+    assert updated.active_routing_rule_set_id == 1
+    assert updated.rule_set_url_proxy_prefix == "https://ghfast.top/"
 
-    await pref_repo.update_preferences(singbox_binary_path=None)
+    await pref_repo.update_preferences(singbox_binary_path=None, rule_set_url_proxy_prefix=None)
     cleared = await pref_repo.get_preferences()
     assert cleared.singbox_binary_path is None
+    assert cleared.rule_set_url_proxy_prefix is None
 
 
 @pytest.mark.asyncio
@@ -106,7 +115,7 @@ async def test_preferences_repo_falls_back_when_old_database_missing_singbox_col
         CREATE TABLE preferences (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             selected_node_id INTEGER,
-            routing_mode TEXT NOT NULL DEFAULT 'rule',
+            routing_mode TEXT NOT NULL DEFAULT 'global',
             dns_leak_protection INTEGER NOT NULL DEFAULT 0,
             warp_enabled INTEGER NOT NULL DEFAULT 0
         )
@@ -124,6 +133,7 @@ async def test_preferences_repo_falls_back_when_old_database_missing_singbox_col
     assert pref.routing_mode == "rule"
     assert pref.warp_enabled is True
     assert pref.singbox_binary_path is None
+    assert pref.rule_set_url_proxy_prefix is None
 
 
 @pytest.mark.asyncio
@@ -147,7 +157,7 @@ async def test_initialize_adds_missing_warp_account_peer_columns(tmp_path):
         CREATE TABLE preferences (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             selected_node_id INTEGER,
-            routing_mode TEXT NOT NULL DEFAULT 'rule',
+            routing_mode TEXT NOT NULL DEFAULT 'global',
             dns_leak_protection INTEGER NOT NULL DEFAULT 0,
             warp_enabled INTEGER NOT NULL DEFAULT 0
         )
@@ -204,3 +214,114 @@ async def test_warp_repo_get_account_falls_back_when_old_database_missing_peer_c
     assert account.peer_endpoint_host is None
     assert account.peer_endpoint_port is None
     assert account.peer_allowed_ips is None
+
+
+@pytest.mark.asyncio
+async def test_initialize_creates_builtin_routing_rule_sets_and_preference_selection(tmp_path):
+    settings = Settings(base_dir=tmp_path)
+    settings.ensure_dirs()
+    db = Database(settings)
+    await db.initialize()
+
+    rule_sets_repo = RoutingRuleSetsRepository(db)
+    rules_repo = RoutingRulesRepository(db)
+    pref_repo = PreferencesRepository(db)
+
+    rule_sets = await rule_sets_repo.list_rule_sets()
+    names = [item.name for item in rule_sets]
+    assert "国内直连" in names
+    assert "全局代理" in names
+
+    cn_direct = next(item for item in rule_sets if item.name == "国内直连")
+    pref = await pref_repo.get_preferences()
+    assert pref.routing_mode == "global"
+    assert pref.active_routing_rule_set_id == cn_direct.id
+    assert cn_direct.is_default is True
+
+    rules = await rules_repo.list_rules(cn_direct.id)
+    assert [(rule.match_type, rule.match_value, rule.action) for rule in rules] == [
+        ("rule_set", "geosite-google", "proxy"),
+        ("rule_set", "geosite-private", "direct"),
+        ("rule_set", "geoip-cn", "direct"),
+        ("rule_set", "geosite-cn", "direct"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_initialize_seeds_builtin_remote_rule_sets(tmp_path):
+    settings = Settings(base_dir=tmp_path)
+    settings.ensure_dirs()
+    db = Database(settings)
+    await db.initialize()
+
+    repo = RuleFilesRepository(db)
+    items = await repo.list_rule_files()
+    tags = {item.tag for item in items}
+
+    assert {"geosite-cn", "geoip-cn", "geosite-google", "geosite-private"}.issubset(tags)
+
+
+@pytest.mark.asyncio
+async def test_initialize_normalizes_builtin_rule_file_ghfast_urls_only(tmp_path):
+    settings = Settings(base_dir=tmp_path)
+    settings.ensure_dirs()
+    db = Database(settings)
+    await db.initialize()
+
+    conn = sqlite3.connect(settings.db_path)
+    conn.execute(
+        "UPDATE rule_files SET url = ? WHERE tag = ?",
+        ("https://ghfast.top/https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs", "geosite-cn"),
+    )
+    conn.execute(
+        "INSERT INTO rule_files (name, tag, format, url, download_detour, is_builtin, auto_enabled, enabled, updated_at) VALUES (?, ?, 'binary', ?, NULL, 0, 0, 1, datetime('now', 'localtime'))",
+        ("自定义", "custom-ghfast", "https://ghfast.top/https://example.com/custom.srs"),
+    )
+    conn.commit()
+    conn.close()
+
+    await db.initialize()
+
+    repo = RuleFilesRepository(db)
+    builtin = await repo.get_rule_file("geosite-cn")
+    custom = await repo.get_rule_file("custom-ghfast")
+
+    assert builtin is not None
+    assert custom is not None
+    assert builtin.url == "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
+    assert custom.url == "https://ghfast.top/https://example.com/custom.srs"
+
+
+@pytest.mark.asyncio
+async def test_routing_rule_repositories_support_custom_rule_set_crud(tmp_path):
+    settings = Settings(base_dir=tmp_path)
+    settings.ensure_dirs()
+    db = Database(settings)
+    await db.initialize()
+
+    rule_sets_repo = RoutingRuleSetsRepository(db)
+    rules_repo = RoutingRulesRepository(db)
+    pref_repo = PreferencesRepository(db)
+
+    custom = await rule_sets_repo.create_rule_set("办公规则")
+    await pref_repo.update_preferences(active_routing_rule_set_id=custom.id)
+    created_rule = await rules_repo.create_rule(
+        custom.id,
+        match_type="rule_set",
+        match_value="geosite-cn",
+        action="proxy",
+    )
+
+    updated_pref = await pref_repo.get_preferences()
+    assert updated_pref.active_routing_rule_set_id == custom.id
+
+    listed_rules = await rules_repo.list_rules(custom.id)
+    assert [rule.id for rule in listed_rules] == [created_rule.id]
+    assert listed_rules[0].match_value == "geosite-cn"
+    assert listed_rules[0].action == "proxy"
+
+    assert await rules_repo.delete_rule(created_rule.id) is True
+    assert await rules_repo.list_rules(custom.id) == []
+    assert await rule_sets_repo.delete_rule_set(custom.id) is True
+    remaining = await rule_sets_repo.list_rule_sets()
+    assert all(item.name != "办公规则" for item in remaining)

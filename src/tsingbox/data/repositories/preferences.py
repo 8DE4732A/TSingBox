@@ -19,7 +19,8 @@ class PreferencesRepository:
                 cursor = await conn.execute(
                     """
                     SELECT id, selected_node_id, routing_mode, dns_leak_protection,
-                           warp_enabled, singbox_binary_path, singbox_active_version
+                           warp_enabled, singbox_binary_path, singbox_active_version,
+                           active_routing_rule_set_id, rule_set_url_proxy_prefix
                     FROM preferences
                     WHERE id = 1
                     """
@@ -27,7 +28,28 @@ class PreferencesRepository:
                 row = await cursor.fetchone()
             except sqlite3.OperationalError as exc:
                 msg = str(exc)
-                if "no such column: singbox_active_version" in msg:
+                if "no such column: rule_set_url_proxy_prefix" in msg:
+                    cursor = await conn.execute(
+                        """
+                        SELECT id, selected_node_id, routing_mode, dns_leak_protection,
+                               warp_enabled, singbox_binary_path, singbox_active_version,
+                               active_routing_rule_set_id
+                        FROM preferences
+                        WHERE id = 1
+                        """
+                    )
+                    row = await cursor.fetchone()
+                elif "no such column: active_routing_rule_set_id" in msg:
+                    cursor = await conn.execute(
+                        """
+                        SELECT id, selected_node_id, routing_mode, dns_leak_protection,
+                               warp_enabled, singbox_binary_path, singbox_active_version
+                        FROM preferences
+                        WHERE id = 1
+                        """
+                    )
+                    row = await cursor.fetchone()
+                elif "no such column: singbox_active_version" in msg:
                     cursor = await conn.execute(
                         """
                         SELECT id, selected_node_id, routing_mode, dns_leak_protection,
@@ -52,11 +74,13 @@ class PreferencesRepository:
             return Preferences(
                 id=1,
                 selected_node_id=None,
-                routing_mode="rule",
+                routing_mode="global",
                 dns_leak_protection=False,
                 warp_enabled=False,
                 singbox_binary_path=None,
                 singbox_active_version=None,
+                active_routing_rule_set_id=None,
+                rule_set_url_proxy_prefix=None,
             )
         keys = row.keys()
         return Preferences(
@@ -67,6 +91,8 @@ class PreferencesRepository:
             warp_enabled=bool(row["warp_enabled"]),
             singbox_binary_path=row["singbox_binary_path"] if "singbox_binary_path" in keys else None,
             singbox_active_version=row["singbox_active_version"] if "singbox_active_version" in keys else None,
+            active_routing_rule_set_id=row["active_routing_rule_set_id"] if "active_routing_rule_set_id" in keys else None,
+            rule_set_url_proxy_prefix=row["rule_set_url_proxy_prefix"] if "rule_set_url_proxy_prefix" in keys else None,
         )
 
     async def set_selected_node(self, node_id: int | None) -> None:
@@ -84,6 +110,8 @@ class PreferencesRepository:
         warp_enabled: bool | None = None,
         singbox_binary_path: str | None | object = UNSET,
         singbox_active_version: str | None | object = UNSET,
+        active_routing_rule_set_id: int | None | object = UNSET,
+        rule_set_url_proxy_prefix: str | None | object = UNSET,
     ) -> None:
         sets: list[str] = []
         values: list[object] = []
@@ -102,6 +130,12 @@ class PreferencesRepository:
         if singbox_active_version is not UNSET:
             sets.append("singbox_active_version = ?")
             values.append(singbox_active_version)
+        if active_routing_rule_set_id is not UNSET:
+            sets.append("active_routing_rule_set_id = ?")
+            values.append(active_routing_rule_set_id)
+        if rule_set_url_proxy_prefix is not UNSET:
+            sets.append("rule_set_url_proxy_prefix = ?")
+            values.append(rule_set_url_proxy_prefix)
 
         if not sets:
             return

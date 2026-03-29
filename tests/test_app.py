@@ -16,7 +16,7 @@ from tsingbox.services.singbox_binary_service import SingboxBinaryCheckResult, S
 from tsingbox.services.proxy_latency_probe import ProxyProbeResult, ProxyProbeStatus
 from tsingbox.services.singbox_controller import ControlResult
 from conftest import create_initialized_app
-from textual.widgets import Button, Log, Static, Switch
+from textual.widgets import Button, Input, Log, OptionList, Static, Switch
 
 
 class DummyConfig:
@@ -163,7 +163,7 @@ async def test_get_dashboard_state_without_selected_node(tmp_path):
     assert state.node_count == 0
     assert state.singbox_status == "stopped"
     assert state.proxy_latency == "--"
-    assert state.routing_mode == "rule"
+    assert state.routing_mode == "global"
     assert state.dns_leak_protection == "关闭"
     assert state.warp_enabled == "关闭"
 
@@ -831,11 +831,89 @@ async def test_auto_apply_selected_node_on_startup_skips_when_no_selected_node(t
 
 
 @pytest.mark.asyncio
-async def test_warp_screen_shows_empty_state_and_removes_save_button(tmp_path):
+async def test_settings_screen_saves_rule_set_url_proxy_prefix(tmp_path):
+    app = await create_initialized_app(tmp_path)
+
+    async with app.run_test() as pilot:
+        await pilot.press("4")
+        await pilot.pause()
+
+        rule_set_url_proxy_prefix = app.query_one("#rule-set-url-proxy-prefix", Input)
+        rule_set_url_proxy_prefix.value = "https://ghfast.top"
+        await pilot.click("#save-settings")
+        await pilot.pause()
+
+        saved_preferences = await app.preferences_repo.get_preferences()
+        assert saved_preferences.rule_set_url_proxy_prefix == "https://ghfast.top/"
+        assert rule_set_url_proxy_prefix.value == "https://ghfast.top/"
+
+
+@pytest.mark.asyncio
+async def test_settings_screen_defaults_to_global_and_rules_screen_can_create_rule_set_rule(tmp_path):
+    app = await create_initialized_app(tmp_path)
+
+    async with app.run_test() as pilot:
+        await pilot.press("4")
+        await pilot.pause()
+
+        route_mode = app.query_one("#route-mode")
+        active_rule_set = app.query_one("#active-rule-set")
+        rule_set_url_proxy_prefix = app.query_one("#rule-set-url-proxy-prefix", Input)
+        assert route_mode.value == "global"
+        assert active_rule_set.disabled is True
+        assert rule_set_url_proxy_prefix.value == ""
+
+        await pilot.press("5")
+        await pilot.pause()
+
+        rule_sets = app.query_one("#rule-sets-list", OptionList)
+        assert len(rule_sets.options) >= 2
+        assert any("国内直连" in option.prompt for option in rule_sets.options)
+        assert any("全局代理" in option.prompt for option in rule_sets.options)
+
+        new_rule_set_name = app.query_one("#new-rule-set-name", Input)
+        new_rule_set_name.value = "办公规则"
+        create_rule_set_button = app.query_one("#create-rule-set", Button)
+        await app.query_one("#rules").on_button_pressed(Button.Pressed(create_rule_set_button))
+        await pilot.pause()
+
+        match_type = app.query_one("#rule-match-type")
+        match_type.value = "rule_set"
+        match_value = app.query_one("#rule-match-value", Input)
+        match_value.value = "geosite-cn"
+        action = app.query_one("#rule-action")
+        action.value = "direct"
+        create_rule_button = app.query_one("#create-rule", Button)
+        await app.query_one("#rules").on_button_pressed(Button.Pressed(create_rule_button))
+        await pilot.pause()
+
+        rules = app.query_one("#rules-list", OptionList)
+        assert any("geosite-cn" in option.prompt for option in rules.options)
+
+        rule_files = app.query_one("#rule-files-list", OptionList)
+        assert any("geosite-cn" in option.prompt for option in rule_files.options)
+
+
+@pytest.mark.asyncio
+async def test_rules_screen_shows_remote_rule_set_as_reference_catalog(tmp_path):
     app = await create_initialized_app(tmp_path)
 
     async with app.run_test() as pilot:
         await pilot.press("5")
+        await pilot.pause()
+
+        rule_files = app.query_one("#rule-files-list", OptionList)
+        assert any("geosite-cn [可引用/内置]" in option.prompt for option in rule_files.options)
+        assert list(app.query("#enable-rule-file").results()) == []
+        assert list(app.query("#disable-rule-file").results()) == []
+
+
+@pytest.mark.asyncio
+async def test_warp_screen_shows_empty_state_and_removes_save_button(tmp_path):
+    app = await create_initialized_app(tmp_path)
+
+    async with app.run_test() as pilot:
+        await pilot.press("6")
         await pilot.pause()
 
         account = app.query_one("#warp-account", Static)
@@ -854,7 +932,7 @@ async def test_warp_screen_shows_existing_account_details(tmp_path):
     )
 
     async with app.run_test() as pilot:
-        await pilot.press("5")
+        await pilot.press("6")
         await pilot.pause()
 
         account = app.query_one("#warp-account", Static)
@@ -870,7 +948,7 @@ async def test_warp_switch_auto_saves_and_warns_without_account(tmp_path):
     app = await create_initialized_app(tmp_path)
 
     async with app.run_test() as pilot:
-        await pilot.press("5")
+        await pilot.press("6")
         await pilot.pause()
 
         switch = app.query_one("#warp-enabled", Switch)
@@ -900,7 +978,7 @@ async def test_warp_refresh_does_not_trigger_auto_save(tmp_path):
     app.preferences_repo.update_preferences = tracked_update_preferences  # type: ignore[method-assign]
 
     async with app.run_test() as pilot:
-        await pilot.press("5")
+        await pilot.press("6")
         await pilot.pause()
         await pilot.press("r")
         await pilot.pause()
@@ -923,7 +1001,7 @@ async def test_generate_warp_refreshes_account_panel(monkeypatch, tmp_path):
     monkeypatch.setattr(app.warp_generator, "generate_and_store", fake_generate_and_store)
 
     async with app.run_test() as pilot:
-        await pilot.press("5")
+        await pilot.press("6")
         await pilot.pause()
         await pilot.click("#gen-warp")
         await pilot.pause()

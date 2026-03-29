@@ -4,11 +4,14 @@ import ipaddress
 import json
 from dataclasses import dataclass
 
-from tsingbox.data.models import Preferences, WarpAccount
+from tsingbox.data.models import Preferences, RuleFile, RoutingRule, RoutingRuleSet, WarpAccount
 from tsingbox.data.repositories.nodes import NodesRepository
 from tsingbox.data.repositories.preferences import PreferencesRepository
+from tsingbox.data.repositories.routing_rules import RoutingRulesRepository
+from tsingbox.data.repositories.routing_rule_sets import RoutingRuleSetsRepository
 from tsingbox.data.repositories.warp_accounts import WarpAccountsRepository
-from tsingbox.services.config_models import DNSConfig, RouteConfig, SingBoxConfig
+from tsingbox.services.config_models import DNSConfig, RouteConfig, RuleSetConfigEntry, SingBoxConfig
+from tsingbox.services.rule_file_service import RuleFileService
 
 WARP_PEER_PUBLIC_KEY = "bmXOC+F1V4JxA8S8d+QsbNf8j2RzYj6JQ5t8V9hV7iE="
 WARP_ENDPOINT = "162.159.193.10"
@@ -49,11 +52,17 @@ class ConfigBuilder:
         *,
         nodes_repo: NodesRepository,
         preferences_repo: PreferencesRepository,
+        routing_rule_sets_repo: RoutingRuleSetsRepository,
+        routing_rules_repo: RoutingRulesRepository,
         warp_repo: WarpAccountsRepository,
+        rule_file_service: RuleFileService,
     ) -> None:
         self.nodes_repo = nodes_repo
         self.preferences_repo = preferences_repo
+        self.routing_rule_sets_repo = routing_rule_sets_repo
+        self.routing_rules_repo = routing_rules_repo
         self.warp_repo = warp_repo
+        self.rule_file_service = rule_file_service
 
     def _normalize_prefix(self, value: str) -> str:
         text = value.strip()
@@ -146,6 +155,96 @@ class ConfigBuilder:
                 "outbound": DIRECT_OUTBOUND_TAG,
             }
         ]
+
+    def _normalize_ip_cidr(self, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("IP/CIDR 规则不能为空")
+        if "/" in text:
+            ipaddress.ip_network(text, strict=False)
+            return text
+        return self._normalize_prefix(text)
+
+    def _map_route_action_to_outbound(self, *, action: str, final_tag: str) -> str:
+        if action == "direct":
+            return DIRECT_OUTBOUND_TAG
+        if action == "proxy":
+            return final_tag
+        raise ValueError(f"不支持的路由动作: {action}")
+
+    def _map_rule_to_singbox_route(self, *, rule: RoutingRule, final_tag: str) -> dict:
+        outbound = self._map_route_action_to_outbound(action=rule.action, final_tag=final_tag)
+        match_value = rule.match_value.strip()
+        if rule.match_type == "domain_suffix":
+            return {"domain_suffix": [match_value.lstrip(".")], "outbound": outbound}
+        if rule.match_type == "domain_keyword":
+            return {"domain_keyword": [match_value], "outbound": outbound}
+        if rule.match_type == "ip_cidr":
+            return {"ip_cidr": [self._normalize_ip_cidr(match_value)], "outbound": outbound}
+        if rule.match_type == "rule_set":
+            return {"rule_set": [match_value], "outbound": outbound}
+        raise ValueError(f"不支持的路由匹配类型: {rule.match_type}")
+
+    async def _resolve_active_rule_set(self, preferences: Preferences) -> RoutingRuleSet | None:
+        if preferences.active_routing_rule_set_id is not None:
+            rule_set = await self.routing_rule_sets_repo.get_rule_set(preferences.active_routing_rule_set_id)
+            if rule_set is not None and rule_set.enabled:
+                return rule_set
+        return await self.routing_rule_sets_repo.get_fallback_rule_set()
+
+    async def _collect_required_rule_files(self, rules: list[RoutingRule]) -> list[RuleFile]:
+        tags: list[str] = []
+        for rule in rules:
+            if not rule.enabled or rule.match_type != "rule_set":
+                continue
+            tag = rule.match_value.strip()
+            if tag and tag not in tags:
+                tags.append(tag)
+        return [await self.rule_file_service.ensure_rule_file(tag) for tag in tags]
+
+    def _build_route_rule_set_entries(
+        self,
+        *,
+        rule_files: list[RuleFile],
+        proxy_prefix: str | None,
+        final_tag: str,
+    ) -> list[RuleSetConfigEntry]:
+        return [
+            RuleSetConfigEntry(
+                tag=rule_file.tag,
+                format=rule_file.format,
+                url=self.rule_file_service.build_rule_file_url(
+                    rule_file=rule_file,
+                    proxy_prefix=proxy_prefix,
+                ),
+                download_detour=final_tag,
+            )
+            for rule_file in rule_files
+        ]
+
+    async def _build_rule_file_rules(self, *, final_tag: str) -> list[dict]:
+        _ = final_tag
+        return []
+
+    async def _build_user_route_rules(self, *, preferences: Preferences, final_tag: str) -> tuple[list[dict], list[RuleSetConfigEntry]]:
+        if preferences.routing_mode != "rule":
+            return [], []
+        rule_set = await self._resolve_active_rule_set(preferences)
+        if rule_set is None:
+            return [], []
+        rules = await self.routing_rules_repo.list_rules(rule_set.id)
+        enabled_rules = [rule for rule in rules if rule.enabled]
+        mapped_rules = [
+            self._map_rule_to_singbox_route(rule=rule, final_tag=final_tag)
+            for rule in enabled_rules
+        ]
+        required_rule_files = await self._collect_required_rule_files(enabled_rules)
+        rule_set_entries = self._build_route_rule_set_entries(
+            rule_files=required_rule_files,
+            proxy_prefix=preferences.rule_set_url_proxy_prefix,
+            final_tag=final_tag,
+        )
+        return [*mapped_rules, *(await self._build_rule_file_rules(final_tag=final_tag))], rule_set_entries
 
     def _replace_host_with_predefined_ip(self, host: str, predefined_hosts: dict[str, list[str]] | None = None) -> str:
         normalized_host = host.strip()
@@ -314,6 +413,10 @@ class ConfigBuilder:
                 *dns_rules,
             ]
 
+        user_route_rules, route_rule_set_entries = await self._build_user_route_rules(
+            preferences=context.preferences,
+            final_tag=remote_dns_detour,
+        )
         dns_final = REMOTE_DNS_TAG if context.preferences.dns_leak_protection else DIRECT_DNS_TAG
         dns_servers.append(self._build_remote_dns_server(detour=remote_dns_detour))
 
@@ -324,7 +427,8 @@ class ConfigBuilder:
             endpoints=endpoints,
             route=RouteConfig(
                 final=final_tag,
-                rules=route_rules,
+                rules=[*route_rules, *user_route_rules],
+                rule_set=route_rule_set_entries,
                 default_domain_resolver={"server": dns_final},
             ),
         )
